@@ -25,6 +25,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt              # CI와 동일한 한 줄
 python -m pytest -q                          # 테스트 (SKIP은 CI에서 실패 처리)
 python -m avap.synth --out output/synth --n 30 --seed 1234 --golden   # 합성 벤치마크
+
+# Phase 0.5 사전 조사 — 라인 이미지가 있는 PC에서 실행 (대상: Pos6·Pos1)
+python -m avap.preflight offset --ref <골든후보> --images <같은 Pos 폴더> --out offset.csv
+python -m avap.preflight anchor --ref <골든후보> --box x,y,w,h --images <폴더> --out anchor.csv
+#  offset: 로딩 오차 분포(|shift|·θ 백분위) → 탐색창·pose gate 값의 근거
+#  anchor: 앵커 후보 NCC 분포 → min_score 권고(p5−0.10). 저신뢰 측정은 분리 집계
 ```
 
 ## Architecture (Phase 0 시점)
