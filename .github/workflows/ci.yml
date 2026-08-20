@@ -1,0 +1,107 @@
+name: AVAP CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────
+  # Tests — pytest 전체. SKIP은 실패로 취급한다:
+  # "SKIP이 PASS로 집계돼 계약 테스트가 조용히 무력화"되는 사고 방지.
+  # ─────────────────────────────────────────────────────────────────
+  tests:
+    name: Tests (pytest, SKIP=fail)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run pytest
+        run: python -m pytest -q --junitxml=report.xml
+      - name: Enforce zero skips
+        run: |
+          python - <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+          root = ET.parse("report.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          skipped = int(suite.get("skipped", 0))
+          tests = int(suite.get("tests", 0))
+          print(f"tests={tests} skipped={skipped}")
+          if tests == 0:
+              print("[FAIL] 테스트가 하나도 실행되지 않음"); sys.exit(1)
+          if skipped:
+              print("[FAIL] SKIP은 통과가 아니다 — 환경/의존성을 고칠 것"); sys.exit(1)
+          EOF
+
+  # ─────────────────────────────────────────────────────────────────
+  # Synthetic benchmark — 매 커밋 '무언가는 반드시 측정'.
+  # Phase 0: 생성 결정성(같은 seed 2회 = 바이트 동일)만 측정.
+  # Phase 1부터 정렬 pose 복원 오차, Phase 2부터 판정 일치율이 여기 추가된다.
+  # 측정값 0건이면 실패 — 항상-skip인데 녹색인 측정 job 금지 (선행 프로젝트 반면교사).
+  # 합성 성적은 benchmark_kind=synthetic — 실사 성능 주장에 인용 금지.
+  # ─────────────────────────────────────────────────────────────────
+  synthetic-benchmark:
+    name: Synthetic benchmark (determinism)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Generate twice and compare bytes
+        run: |
+          python -m avap.synth --out /tmp/synth_a --n 30 --seed 1234 --golden
+          python -m avap.synth --out /tmp/synth_b --n 30 --seed 1234 --golden
+          python - <<'EOF'
+          import sys
+          from pathlib import Path
+          a, b = Path("/tmp/synth_a"), Path("/tmp/synth_b")
+          fa = {p.name: p.read_bytes() for p in sorted(a.iterdir())}
+          fb = {p.name: p.read_bytes() for p in sorted(b.iterdir())}
+          if not fa:
+              print("[FAIL] 측정값 0건 — 생성 실패"); sys.exit(1)
+          if list(fa) != list(fb):
+              print("[FAIL] 파일 목록 불일치"); sys.exit(1)
+          diff = [n for n in fa if fa[n] != fb[n]]
+          if diff:
+              print(f"[FAIL] 같은 seed인데 바이트 불일치: {diff}"); sys.exit(1)
+          print(f"[OK] {len(fa)}개 파일 결정성 확인 (seed=1234, n=30)")
+          EOF
+
+  # ─────────────────────────────────────────────────────────────────
+  # No binary leak — 이미지·모델 파일 커밋 차단 (실사는 저장소 밖에만 존재)
+  # ─────────────────────────────────────────────────────────────────
+  no-binary-leak:
+    name: No binary leak (images / models)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Block committed binaries
+        run: |
+          violations=$(find . \
+            \( -name "*.pt" -o -name "*.onnx" -o -name "*.engine" \
+               -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \
+               -o -name "*.bmp" -o -name "*.tiff" \) \
+            -not -path "./.git/*" -not -path "./venv/*" -print 2>/dev/null)
+          if [ -n "$violations" ]; then
+            echo "[FAIL] 바이너리 커밋 감지:"; echo "$violations"; exit 1
+          fi
+          echo "[OK] 바이너리 없음 — 테스트 이미지는 synth로 런타임 생성"
