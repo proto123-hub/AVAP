@@ -48,3 +48,12 @@ def test_sidecar_carries_ground_truth(tmp_path):
 def test_golden_write(tmp_path):
     p = write_golden(tmp_path / "golden.png")
     assert p.is_file() and p.stat().st_size > 0
+
+
+def test_zero_n_rejected():
+    # n=0 + --golden 은 golden.png 하나로 "측정 0건" CI 검사를 통과시켰다 (외부 검증 발견).
+    # 벤치마크 생성기 자체가 측정 0건 세트를 만들 수 없어야 한다.
+    from avap.synth import generate_set
+    import pytest
+    with pytest.raises(ValueError, match="1 이상"):
+        generate_set("/tmp/should_not_exist_avap", n=0)

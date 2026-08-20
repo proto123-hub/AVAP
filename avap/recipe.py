@@ -1,6 +1,6 @@
 """Recipe: the single source of truth for one inspection job.
 
-Design Laws enforced here (docs/AVAP_DESIGN_REVIEW.md §4.1):
+Design Laws enforced here (docs/DESIGN.md §2):
 - L1 (schema side): every rule parameter must be declared in PARAM_SPECS for
   its tool — an unknown key fails the load, so a parameter with no consumer
   cannot exist. (Judgment-side sensitivity probes arrive with the tools in
@@ -124,6 +124,46 @@ class Recipe:
 
 # ── Validation helpers ───────────────────────────────────────────────────
 
+# Allowed keys per block. Keys starting with "_" are annotations — always
+# allowed (documentation convention), never consumed by code. Anything else
+# not listed here fails the load: an unknown key is either a typo or a
+# parameter nothing consumes, and both must be loud (L1).
+ALLOWED_KEYS: dict[str, frozenset[str]] = {
+    "": frozenset({"avap_recipe", "meta", "golden", "alignment", "rois", "provenance"}),
+    "meta": frozenset({"recipe_id", "recipe_version", "fingerprint",
+                       "created_by", "created_at"}),
+    "golden": frozenset({"image_sha", "size"}),
+    "alignment": frozenset({"method", "anchors", "pose_gates", "min_score_basis"}),
+    "alignment.min_score_basis": frozenset({"golden_n", "p5", "margin"}),
+    "alignment.anchors[]": frozenset({"id", "patch", "origin", "search",
+                                      "min_score", "required"}),
+    "alignment.pose_gates": frozenset({"max_shift_frac", "max_rotation_deg",
+                                       "anchor_dist_tol_frac", "scale_tol"}),
+    "rois[]": frozenset({"id", "label", "rect_golden", "detect", "rules"}),
+    "rois[].detect": frozenset({"space", "lower", "upper", "morph"}),
+    "rois[].detect.morph": frozenset({"kernel", "size", "open_iter", "close_iter"}),
+}
+
+
+def _check_unknown_keys(errors: list[str], where: str, block: Any, allowed_id: str) -> None:
+    if not isinstance(block, dict):
+        return
+    allowed = ALLOWED_KEYS[allowed_id]
+    for key in block:
+        if key.startswith("_"):
+            continue  # annotation
+        if key not in allowed:
+            errors.append(
+                f"{where or 'recipe'}: 알 수 없는 키 '{key}' — 오타이거나 소비자 없는 "
+                f"파라미터 (L1). 허용: {', '.join(sorted(allowed))} (주석은 '_' 접두)"
+            )
+
+
+def _check_frac(errors: list[str], where: str, value: Any, hi: float = 1.0) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0.0 < value <= hi):
+        errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) — {value!r}")
+
+
 def _freeze(d: dict) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted((k, _immutable(v)) for k, v in d.items()))
 
@@ -206,6 +246,10 @@ def load_recipe(path: str | Path) -> Recipe:
 def parse_recipe(data: dict) -> Recipe:
     errors: list[str] = []
 
+    _check_unknown_keys(errors, "", data, "")
+    _check_unknown_keys(errors, "meta", data.get("meta"), "meta")
+    _check_unknown_keys(errors, "golden", data.get("golden"), "golden")
+
     if data.get("avap_recipe") != RECIPE_SCHEMA_VERSION:
         errors.append(
             f"avap_recipe 스키마 버전 불일치: {data.get('avap_recipe')!r} "
@@ -231,6 +275,9 @@ def parse_recipe(data: dict) -> Recipe:
 
     # alignment
     al = data.get("alignment", {})
+    _check_unknown_keys(errors, "alignment", al, "alignment")
+    _check_unknown_keys(errors, "alignment.min_score_basis",
+                        al.get("min_score_basis"), "alignment.min_score_basis")
     method = al.get("method")
     if method != "template_2anchor":
         errors.append(f"alignment.method 미지원: {method!r} (v1: template_2anchor)")
@@ -240,6 +287,9 @@ def parse_recipe(data: dict) -> Recipe:
         errors.append(f"alignment.anchors는 2개 이상이어야 함 — {len(anchors_raw)}개")
     for i, a in enumerate(anchors_raw):
         where = f"alignment.anchors[{i}]"
+        _check_unknown_keys(errors, where, a, "alignment.anchors[]")
+        if "required" in a and not isinstance(a["required"], bool):
+            errors.append(f"{where}.required: true/false 여야 함 — {a['required']!r}")
         for k in ("id", "patch", "origin", "search"):
             if k not in a:
                 errors.append(f"{where}: '{k}' 누락")
@@ -271,6 +321,11 @@ def parse_recipe(data: dict) -> Recipe:
             )
 
     gates = al.get("pose_gates", {})
+    _check_unknown_keys(errors, "alignment.pose_gates", gates, "alignment.pose_gates")
+    _check_frac(errors, "pose_gates.max_shift_frac", gates.get("max_shift_frac", 0.05))
+    _check_frac(errors, "pose_gates.anchor_dist_tol_frac",
+                gates.get("anchor_dist_tol_frac", 0.01))
+    _check_frac(errors, "pose_gates.scale_tol", gates.get("scale_tol", 0.02))
     max_rot = gates.get("max_rotation_deg", 3.0)
     if not isinstance(max_rot, (int, float)) or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT):
         errors.append(
@@ -285,8 +340,24 @@ def parse_recipe(data: dict) -> Recipe:
     for i, r in enumerate(rois_raw):
         where = f"rois[{i}]"
         roi_id = r.get("id") or f"roi_{i}"
+        _check_unknown_keys(errors, where, r, "rois[]")
         _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
         detect = r.get("detect", {})
+        _check_unknown_keys(errors, f"{where}.detect", detect, "rois[].detect")
+        if detect.get("space", "hsv") != "hsv":
+            errors.append(f"{where}.detect.space 미지원: {detect.get('space')!r} (v1: hsv)")
+        morph = detect.get("morph")
+        if morph is not None:
+            _check_unknown_keys(errors, f"{where}.detect.morph", morph, "rois[].detect.morph")
+            if morph.get("kernel", "ellipse") not in ("ellipse", "rect", "cross"):
+                errors.append(f"{where}.detect.morph.kernel 미지원: {morph.get('kernel')!r}")
+            ksize = morph.get("size", 5)
+            if not isinstance(ksize, int) or isinstance(ksize, bool) or not (1 <= ksize <= 99):
+                errors.append(f"{where}.detect.morph.size: 1~99 정수여야 함 — {ksize!r}")
+            for it in ("open_iter", "close_iter"):
+                v = morph.get(it, 1)
+                if not isinstance(v, int) or isinstance(v, bool) or not (0 <= v <= 10):
+                    errors.append(f"{where}.detect.morph.{it}: 0~10 정수여야 함 — {v!r}")
         for bound in ("lower", "upper"):
             v = detect.get(bound)
             if (not isinstance(v, list)) or len(v) != 3 or not all(

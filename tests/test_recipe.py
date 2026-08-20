@@ -99,3 +99,49 @@ def test_roi_outside_frame_rejected():
     d["rois"][0]["rect_golden"] = [0.9, 0.9, 0.3, 0.3]
     with pytest.raises(RecipeError, match="벗어남"):
         parse_recipe(d)
+
+
+# ── Phase 0 hardening: 미지 키 거부(전 레벨) + pose_gates 범위 (외부 검증 발견) ──
+
+def test_unknown_top_level_key_rejected():
+    d = _sample_dict()
+    d["extra_block"] = {"anything": 1}
+    with pytest.raises(RecipeError, match="알 수 없는 키 'extra_block'"):
+        parse_recipe(d)
+
+
+def test_unknown_roi_key_rejected():
+    d = _sample_dict()
+    d["rois"][0]["custom_threshold"] = 0.5  # 소비자 없는 파라미터의 전형
+    with pytest.raises(RecipeError, match="알 수 없는 키 'custom_threshold'"):
+        parse_recipe(d)
+
+
+def test_unknown_pose_gate_key_rejected():
+    d = _sample_dict()
+    d["alignment"]["pose_gates"]["max_shift_px"] = 40  # frac을 px로 오타 낸 상황
+    with pytest.raises(RecipeError, match="알 수 없는 키 'max_shift_px'"):
+        parse_recipe(d)
+
+
+def test_pose_gate_fractions_range_enforced():
+    # 외부 검증에서 실제 통과했던 값 3종 — 전부 거부돼야 한다 (L7)
+    for key, bad in (("max_shift_frac", 20), ("anchor_dist_tol_frac", -1), ("scale_tol", 25)):
+        d = _sample_dict()
+        d["alignment"]["pose_gates"][key] = bad
+        with pytest.raises(RecipeError, match=key):
+            parse_recipe(d)
+
+
+def test_underscore_annotation_keys_allowed():
+    d = _sample_dict()
+    d["_comment"] = "주석은 어느 레벨에서든 허용"
+    d["rois"][0]["_why"] = "이 ROI는 상단 도포부"
+    parse_recipe(d)  # 예외 없이 통과
+
+
+def test_bad_morph_rejected():
+    d = _sample_dict()
+    d["rois"][0]["detect"]["morph"]["size"] = 0
+    with pytest.raises(RecipeError, match="morph.size"):
+        parse_recipe(d)

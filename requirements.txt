@@ -1,5 +1,7 @@
-# AVAP — Phase 0 dependencies (Color-경로 코어 + 테스트)
-# GUI(Phase 3)에서 opencv-python(+PyQt5)로 교체·추가된다. CI와 로컬이 같은 한 줄을 쓴다.
+# AVAP - Phase 0 dependencies (core + tests).
+# ASCII only in this file: on a clean Windows venv the bundled pip may read
+# this file with the locale codec (CP949) and crash on non-ASCII comments.
+# GUI deps (opencv-python, PyQt5) arrive in Phase 3. CI installs this same line.
 numpy>=1.26,<3
 opencv-python-headless>=4.10,<6
 pytest>=8

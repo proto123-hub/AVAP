@@ -70,19 +70,30 @@ jobs:
           python -m avap.synth --out /tmp/synth_a --n 30 --seed 1234 --golden
           python -m avap.synth --out /tmp/synth_b --n 30 --seed 1234 --golden
           python - <<'EOF'
-          import sys
+          import json, sys
           from pathlib import Path
+          EXPECTED_N = 30  # 위 생성 명령의 --n 과 함께 바꿀 것
           a, b = Path("/tmp/synth_a"), Path("/tmp/synth_b")
           fa = {p.name: p.read_bytes() for p in sorted(a.iterdir())}
           fb = {p.name: p.read_bytes() for p in sorted(b.iterdir())}
-          if not fa:
-              print("[FAIL] 측정값 0건 — 생성 실패"); sys.exit(1)
+          # 측정 = GT 사이드카. golden.png 하나로는 통과 불가 — 사이드카 개수와
+          # 내용(pose·기대 verdict)을 검증해야 "측정 0건이면 실패"가 실제로 성립한다.
+          sidecars = sorted(a.glob("synth_*.json"))
+          if len(sidecars) != EXPECTED_N:
+              print(f"[FAIL] 측정 사이드카 {len(sidecars)}개 != 기대 {EXPECTED_N}개"); sys.exit(1)
+          for sc in sidecars:
+              gt = json.loads(sc.read_text(encoding="utf-8"))
+              pose = gt.get("pose", {})
+              if not all(k in pose for k in ("tx", "ty", "theta_deg")) \
+                      or "expected_verdict" not in gt \
+                      or gt.get("benchmark_kind") != "synthetic":
+                  print(f"[FAIL] 사이드카 필드 불량: {sc.name} — {sorted(gt)}"); sys.exit(1)
           if list(fa) != list(fb):
               print("[FAIL] 파일 목록 불일치"); sys.exit(1)
           diff = [n for n in fa if fa[n] != fb[n]]
           if diff:
               print(f"[FAIL] 같은 seed인데 바이트 불일치: {diff}"); sys.exit(1)
-          print(f"[OK] {len(fa)}개 파일 결정성 확인 (seed=1234, n=30)")
+          print(f"[OK] 사이드카 {len(sidecars)}개 검증 + {len(fa)}개 파일 결정성 확인 (seed=1234)")
           EOF
 
   # ─────────────────────────────────────────────────────────────────
