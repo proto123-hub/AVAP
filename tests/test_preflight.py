@@ -79,3 +79,16 @@ def test_anchor_screening_flags_bad_anchor(synth_dir):
     assert scores and min(scores) < 0.5, (
         f"도포부 박스가 미도포 이미지에서도 고점수({scores}) — 스크리닝이 나쁜 앵커를 못 거름"
     )
+
+
+def test_anchor_summary_p5_is_not_the_minimum():
+    # 이전 구현 scores[int(n*0.05)-1]은 n<40에서 최솟값을 반환해, 이상치 1장이
+    # min_score 권고를 통째로 끌어내렸다 (외부 검증 발견). 보간 백분위여야 한다.
+    from avap.preflight import anchor_summary
+    scores = [0.30] + [0.80 + 0.003 * i for i in range(39)]  # n=40, 이상치 1개
+    s = anchor_summary(scores)
+    assert s["n"] == 40
+    assert s["ncc_min"] == 0.30
+    assert s["ncc_p5"] > 0.5, f"p5={s['ncc_p5']} — 여전히 이상치에 끌려감"
+    assert s["min_score_suggestion"] == round(s["ncc_p5"] - 0.10, 3)
+    assert anchor_summary([])["min_score_suggestion"] is None

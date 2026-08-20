@@ -157,6 +157,28 @@ def score_anchor(ref_bgr: np.ndarray, box: tuple[int, int, int, int],
     return float(res.max())
 
 
+def anchor_summary(scores: list[float]) -> dict:
+    """NCC score distribution -> min_score recommendation (p5 - 0.10 margin).
+
+    Uses real interpolated percentiles (np.percentile): the earlier
+    nearest-rank shortcut `scores[int(n*0.05)-1]` returned the MINIMUM for
+    n<40 samples, dragging the recommendation down to the worst outlier at
+    exactly the 30~50-image sample sizes this survey targets.
+    """
+    if not scores:
+        return {"n": 0, "ncc_min": None, "ncc_p5": None, "ncc_p50": None,
+                "min_score_suggestion": None}
+    arr = np.asarray(scores, dtype=float)
+    p5 = float(np.percentile(arr, 5))
+    return {
+        "n": int(arr.size),
+        "ncc_min": round(float(arr.min()), 4),
+        "ncc_p5": round(p5, 4),
+        "ncc_p50": round(float(np.percentile(arr, 50)), 4),
+        "min_score_suggestion": round(p5 - 0.10, 3),
+    }
+
+
 def survey_anchor(ref_path: Path, box: tuple[int, int, int, int],
                   images_dir: Path, margin: int, out_csv: Path | None) -> dict:
     """NCC score distribution of one anchor candidate across a folder."""
@@ -169,17 +191,7 @@ def survey_anchor(ref_path: Path, box: tuple[int, int, int, int],
         rows.append({"file": f.name, "ncc": round(score, 4)})
         print(f"  {f.name}: NCC={score:.3f}")
 
-    scores = sorted(r["ncc"] for r in rows)
-    n = len(scores)
-    summary = {
-        "n": n,
-        "ncc_min": scores[0] if n else None,
-        "ncc_p5": scores[max(0, int(n * 0.05) - 1)] if n else None,
-        "ncc_p50": scores[n // 2] if n else None,
-        # min_score 권고: p5 − 0.10 마진 (advisor 백분위 철학, §4.4)
-        "min_score_suggestion": round(scores[max(0, int(n * 0.05) - 1)] - 0.10, 3)
-        if n else None,
-    }
+    summary = anchor_summary([r["ncc"] for r in rows])
     if out_csv is not None:
         with open(out_csv, "w", newline="", encoding="utf-8-sig") as fh:
             w = csv.DictWriter(fh, fieldnames=["file", "ncc"])
