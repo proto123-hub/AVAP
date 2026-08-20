@@ -1,12 +1,12 @@
-"""Phase 0.5 preflight surveys — run on the PC that holds the real line images.
+"""Phase 0.5 preflight surveys - run on the PC that holds the real line images.
 
 Two questions must be answered with data BEFORE the alignment engine is
-tuned (docs/DESIGN.md §11 Phase 0.5 — the design review found the
+tuned (docs/DESIGN.md §11 Phase 0.5 - the design review found the
 original plans assumed these numbers instead of measuring them):
 
-1. offset — how far do products actually move between shots?
+1. offset - how far do products actually move between shots?
    → sets the anchor search-window size and the pose gates.
-2. anchor — is a candidate landmark stable across the whole set?
+2. anchor - is a candidate landmark stable across the whole set?
    → NCC score distribution decides min_score (percentile basis, same
      philosophy as the percentile-based threshold advisor: p5 minus a margin).
 
@@ -36,7 +36,7 @@ SURVEY_MAX_W = 640
 ANGLE_SWEEP_DEG = 4.0
 ANGLE_STEP_DEG = 0.25
 # Below this phase-correlation response the measurement is content-driven
-# noise (e.g. the applied material differs wildly between shots) — it is
+# noise (e.g. the applied material differs wildly between shots) - it is
 # excluded from the summary statistics but still reported, never silently.
 MIN_SURVEY_RESPONSE = 0.35
 
@@ -63,13 +63,13 @@ def estimate_pose(ref_bgr: np.ndarray, img_bgr: np.ndarray) -> dict:
     Method: sweep small rotations, de-rotate, cv2.phaseCorrelate with a
     Hanning window; keep the angle with the highest correlation response.
     Note: the reported shift is measured after de-rotation, so its
-    components are in the de-rotated frame — the magnitude is what sizes
+    components are in the de-rotated frame - the magnitude is what sizes
     the search window, and that is preserved.
     """
     if ref_bgr.shape[:2] != img_bgr.shape[:2]:
         rh, rw = ref_bgr.shape[:2]; ih, iw = img_bgr.shape[:2]
         raise ValueError(
-            f"해상도 불일치: ref {rw}x{rh} vs image {iw}x{ih} — 원본 크기가 달라도 "
+            f"해상도 불일치: ref {rw}x{rh} vs image {iw}x{ih} - 원본 크기가 달라도 "
             f"다운스케일 후엔 같아져 가짜 측정이 나온다. 같은 카메라 설정의 세트인지 확인"
         )
     ref, scale = _gray_small(ref_bgr)
@@ -86,7 +86,7 @@ def estimate_pose(ref_bgr: np.ndarray, img_bgr: np.ndarray) -> dict:
 
     k = max(range(len(samples)), key=lambda j: samples[j][1])
     angle, response, dx, dy = samples[k]
-    # Sub-step angle: parabola through the response peak and its neighbors —
+    # Sub-step angle: parabola through the response peak and its neighbors -
     # without this the estimate snaps to the ANGLE_STEP_DEG grid.
     if 0 < k < len(samples) - 1:
         r0, r1, r2 = samples[k - 1][1], response, samples[k + 1][1]
@@ -121,7 +121,7 @@ def survey_offset(ref_path: Path, images_dir: Path, out_csv: Path | None) -> dic
         low = pose["response"] < MIN_SURVEY_RESPONSE
         rows.append({"file": f.name, "low_confidence": int(low),
                      **{k: round(v, 3) for k, v in pose.items()}})
-        flag = "  (저신뢰 — 통계 제외)" if low else ""
+        flag = "  (저신뢰 - 통계 제외)" if low else ""
         print(f"  [{i + 1}/{len(files)}] {f.name}: |shift|={pose['shift_px']:.1f}px "
               f"theta={pose['theta_deg']:+.2f}deg resp={pose['response']:.3f}{flag}")
 
@@ -154,13 +154,20 @@ def score_anchor(ref_bgr: np.ndarray, box: tuple[int, int, int, int],
         rh, rw = ref_bgr.shape[:2]; ih, iw = img_bgr.shape[:2]
         raise ValueError(f"해상도 불일치: ref {rw}x{rh} vs image {iw}x{ih}")
     x, y, w, h = box
+    rh, rw = ref_bgr.shape[:2]
+    if x < 0 or y < 0 or w < 1 or h < 1 or x + w > rw or y + h > rh:
+        # numpy 슬라이싱은 범위 밖을 조용히 잘라 패치가 요청보다 작아진다 -
+        # 그 상태의 매칭은 측정이 아니다. sentinel(-1.0)로 돌려주면 유효 측정으로
+        # 집계돼 n=1·exit 0이 되므로 반드시 예외로 (외부 검증 발견).
+        raise ValueError(f"앵커 박스가 기준 이미지를 벗어남: box={box}, ref {rw}x{rh}")
     patch = cv2.cvtColor(ref_bgr[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY)
     ih, iw = img_bgr.shape[:2]
     x0, y0 = max(0, x - margin), max(0, y - margin)
     x1, y1 = min(iw, x + w + margin), min(ih, y + h + margin)
     window = cv2.cvtColor(img_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     if window.shape[0] < h or window.shape[1] < w:
-        return -1.0
+        raise ValueError(f"탐색창({window.shape[1]}x{window.shape[0]})이 "
+                         f"패치({w}x{h})보다 작음: box={box}, margin={margin}")
     res = cv2.matchTemplate(window, patch, cv2.TM_CCOEFF_NORMED)
     return float(res.max())
 
@@ -233,7 +240,7 @@ def main() -> None:
     p2.add_argument("--box", required=True, help="앵커 박스 x,y,w,h (기준 이미지 픽셀)")
     p2.add_argument("--images", required=True, help="같은 Position 이미지 폴더")
     p2.add_argument("--margin", type=int, default=80,
-                    help="탐색창 확장(px) — offset 조사에서 나온 최대 이동보다 크게")
+                    help="탐색창 확장(px) - offset 조사에서 나온 최대 이동보다 크게")
     p2.add_argument("--out", default=None, help="결과 CSV 경로 (utf-8-sig)")
 
     args = ap.parse_args()
@@ -242,8 +249,8 @@ def main() -> None:
                           Path(args.out) if args.out else None)
         _print_summary("로딩 오차 분포 (탐색창·pose gate 근거)", s)
         if s["n"] == 0:
-            # 이미지 0장·전량 저신뢰·전량 해상도 불일치 — 어느 쪽이든 측정은 없다.
-            print("[FAIL] 유효 측정 0건 — 이 요약으로는 아무것도 결정할 수 없다. "
+            # 이미지 0장·전량 저신뢰·전량 해상도 불일치 - 어느 쪽이든 측정은 없다.
+            print("[FAIL] 유효 측정 0건 - 이 요약으로는 아무것도 결정할 수 없다. "
                   f"(저신뢰 {s['n_low_confidence']}건 / 오류 {s['n_error']}건)")
             sys.exit(1)
         print("  -> recipe 권고: search 창은 max_shift보다 크게, "
@@ -256,9 +263,9 @@ def main() -> None:
                           args.margin, Path(args.out) if args.out else None)
         _print_summary("앵커 후보 점수 분포", s)
         if s["n"] == 0:
-            print(f"[FAIL] 유효 측정 0건 — min_score 권고 불가. (오류 {s.get('n_error', 0)}건)")
+            print(f"[FAIL] 유효 측정 0건 - min_score 권고 불가. (오류 {s.get('n_error', 0)}건)")
             sys.exit(1)
-        print("  -> min_score_suggestion은 p5-0.10 초기 권고치 — 실운영 전 재확인")
+        print("  -> min_score_suggestion은 p5-0.10 초기 권고치 - 실운영 전 재확인")
 
 
 if __name__ == "__main__":

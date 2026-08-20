@@ -134,3 +134,48 @@ def test_cli_exits_nonzero_when_no_valid_measurement(synth_dir, tmp_path):
                            cwd=repo, capture_output=True, text=True, timeout=120)
         assert r.returncode != 0, f"{cmd[0]}: 빈 폴더인데 성공 종료\n{r.stdout}"
         assert "[FAIL]" in r.stdout
+
+
+def test_out_of_bounds_anchor_box_is_error_not_valid_measurement(synth_dir, tmp_path):
+    # 범위 밖 박스가 -1.0 sentinel로 유효 측정 집계돼 n=1·suggestion=-1.1·exit 0이
+    # 되던 결함 (외부 검증 발견 + 재현 확인). ValueError → error 행이어야 한다.
+    from avap.preflight import score_anchor, survey_anchor
+    ref = imread_u(synth_dir / "golden.png")
+    h, w = ref.shape[:2]
+    bad_box = (w - 40, h - 40, 80, 90)
+    with pytest.raises(ValueError, match="벗어남"):
+        score_anchor(ref, bad_box, imread_u(sorted(synth_dir.glob("synth_*.png"))[0]),
+                     margin=10)
+    s = survey_anchor(synth_dir / "golden.png", bad_box, synth_dir, margin=10,
+                      out_csv=None)
+    assert s["n"] == 0 and s["n_error"] >= 9
+    assert s["min_score_suggestion"] is None  # 쓰레기 권고(-1.1) 재발 금지
+
+
+def test_cli_stdout_survives_cp949(synth_dir, tmp_path):
+    # Windows 기본 콘솔(CP949)에서 em dash 등 인코딩 불가 문자가 stdout에 있으면
+    # 성공한 조사도 마지막 출력에서 UnicodeEncodeError로 죽는다 (외부 검증 발견 +
+    # 재현: '—' position 82). 성공·실패 경로 전부 CP949 stdout으로 실행한다.
+    import os, subprocess, sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONIOENCODING": "cp949"}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    golden = str(synth_dir / "golden.png")
+    cases = [  # (인자, 기대 returncode==0)
+        (["offset", "--ref", golden, "--images", str(synth_dir)], True),
+        (["offset", "--ref", golden, "--images", str(empty)], False),
+        (["anchor", "--ref", golden, "--box", "700,495,80,90",
+          "--images", str(synth_dir)], True),
+        (["anchor", "--ref", golden, "--box", "700,495,80,90",
+          "--images", str(empty)], False),
+    ]
+    for args, expect_ok in cases:
+        # 자식은 cp949로 쓰므로 부모도 cp949로 읽는다 (UTF-8로 읽으면 테스트가 죽음)
+        r = subprocess.run([sys.executable, "-m", "avap.preflight", *args],
+                           cwd=repo, env=env, capture_output=True,
+                           encoding="cp949", errors="replace", timeout=180)
+        assert "UnicodeEncodeError" not in r.stderr, f"{args[0]}: CP949 크래시\n{r.stderr}"
+        assert (r.returncode == 0) == expect_ok, \
+            f"{args}: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
