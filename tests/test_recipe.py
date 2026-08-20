@@ -215,3 +215,32 @@ def test_min_score_basis_field_values_validated():
         d["alignment"]["min_score_basis"][key] = bad
         with pytest.raises(RecipeError, match=f"min_score_basis.{key}"):
             parse_recipe(d)
+
+
+def test_explicit_null_rejected_everywhere():
+    # 키 부재(기본값 OK)와 "key": null(작성된 값)은 다르다 — null이 기본값으로
+    # 조용히 대체되면 죽은 설정의 탄생 경로가 된다 (외부 검증 발견 + 재현:
+    # pose_gates=null이 max_shift_frac 기본값 0.05로 통과했다).
+    for desc, mutate in [
+        ("pose_gates", lambda d: d["alignment"].__setitem__("pose_gates", None)),
+        ("alignment", lambda d: d.__setitem__("alignment", None)),
+        ("min_score_basis", lambda d: d["alignment"].__setitem__("min_score_basis", None)),
+        ("morph", lambda d: d["rois"][0]["detect"].__setitem__("morph", None)),
+        ("provenance", lambda d: d.__setitem__("provenance", None)),
+        ("meta", lambda d: d.__setitem__("meta", None)),
+        ("anchors 원소", lambda d: d["alignment"]["anchors"].__setitem__(0, None)),
+    ]:
+        d = _sample_dict()
+        mutate(d)
+        with pytest.raises(RecipeError, match="객체여야 함|배열이어야 함"), _no_crash(desc):
+            parse_recipe(d)
+
+
+def test_absent_optional_blocks_still_use_defaults():
+    # sentinel 도입이 "생략 시 기본값" 동작을 깨지 않아야 한다
+    d = _sample_dict()
+    d["alignment"].pop("min_score_basis", None)
+    d["alignment"]["pose_gates"].pop("scale_tol", None)
+    d["rois"][0]["detect"].pop("morph", None)
+    r = parse_recipe(d)
+    assert r.alignment.scale_tol == 0.02  # 기본값
