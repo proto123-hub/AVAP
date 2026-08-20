@@ -1,0 +1,59 @@
+{
+  "avap_recipe": "1.0",
+  "meta": {
+    "recipe_id": "SYNTH_BEAD_V1",
+    "recipe_version": 1,
+    "created_by": "avap-phase0",
+    "created_at": "2026-08-20",
+    "note": "avap/synth.py 골든 이미지에 대응하는 참조 recipe — 로더·정렬·판정 테스트의 공용 픽스처"
+  },
+  "golden": {
+    "image_sha": "unbound",
+    "size": [960, 720],
+    "source": "python -m avap.synth --golden 으로 재생성 (저장소에 이미지 커밋 금지)"
+  },
+  "alignment": {
+    "method": "template_2anchor",
+    "anchors": [
+      {
+        "id": "boss_TL",
+        "patch": "anchors/boss_tl.png",
+        "origin": [0.19792, 0.20833, 0.0625, 0.08333],
+        "search": [0.13542, 0.125, 0.1875, 0.25],
+        "min_score": 0.7
+      },
+      {
+        "id": "boss_BR",
+        "patch": "anchors/boss_br.png",
+        "origin": [0.73958, 0.70833, 0.0625, 0.08333],
+        "search": [0.67708, 0.625, 0.1875, 0.25],
+        "min_score": 0.7
+      }
+    ],
+    "min_score_basis": {"golden_n": 0, "note": "미보정 초기값 — OK 세트 p5-마진으로 갱신 예정"},
+    "pose_gates": {
+      "max_shift_frac": 0.05,
+      "max_rotation_deg": 3.0,
+      "anchor_dist_tol_frac": 0.01,
+      "scale_tol": 0.02
+    }
+  },
+  "rois": [
+    {
+      "id": "bead_main",
+      "label": "메인 비드 도포",
+      "rect_golden": [0.34375, 0.375, 0.3125, 0.08333],
+      "detect": {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.55],
+        "upper": [1.0, 0.15, 0.8],
+        "morph": {"kernel": "ellipse", "size": 5, "open_iter": 1, "close_iter": 2}
+      },
+      "rules": [
+        {"tool": "blob", "count_min": 1, "count_max": 2, "area_min": 0.005, "area_max": 0.9},
+        {"tool": "coverage", "min": 0.2, "continuity_min": 0.8},
+        {"tool": "color_stats", "expect_hsv_center": [0.0, 0.02, 0.66], "max_dist": 0.2}
+      ]
+    }
+  ]
+}

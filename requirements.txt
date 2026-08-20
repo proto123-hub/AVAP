@@ -1,0 +1,5 @@
+# AVAP — Phase 0 dependencies (Color-경로 코어 + 테스트)
+# GUI(Phase 3)에서 opencv-python(+PyQt5)로 교체·추가된다. CI와 로컬이 같은 한 줄을 쓴다.
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<6
+pytest>=8
