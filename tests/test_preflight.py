@@ -92,3 +92,45 @@ def test_anchor_summary_p5_is_not_the_minimum():
     assert s["ncc_p5"] > 0.5, f"p5={s['ncc_p5']} — 여전히 이상치에 끌려감"
     assert s["min_score_suggestion"] == round(s["ncc_p5"] - 0.10, 3)
     assert anchor_summary([])["min_score_suggestion"] is None
+
+
+def test_resolution_mismatch_rejected_before_downscale(synth_dir):
+    # 1280x960 vs 640x480은 다운스케일 후 크기가 같아져 그럴듯한 가짜 측정
+    # (실측 재현: response 0.517)을 냈다 (외부 검증 발견). 원본 크기에서 거부해야 한다.
+    import cv2
+    from avap.preflight import estimate_pose, score_anchor
+    ref = imread_u(synth_dir / "golden.png")
+    doubled = cv2.resize(ref, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
+    with pytest.raises(ValueError, match="해상도 불일치"):
+        estimate_pose(ref, doubled)
+    with pytest.raises(ValueError, match="해상도 불일치"):
+        score_anchor(ref, (10, 10, 40, 40), doubled, margin=80)
+
+
+def test_survey_records_resolution_mismatch_as_error(synth_dir, tmp_path):
+    import cv2
+    from avap.io_utils import imwrite_u
+    d = tmp_path / "mixed"
+    d.mkdir()
+    ref = imread_u(synth_dir / "golden.png")
+    imwrite_u(d / "big.png", cv2.resize(ref, None, fx=2, fy=2))
+    s = survey_offset(synth_dir / "golden.png", d, None)
+    assert s["n"] == 0 and s["n_error"] == 1  # 가짜 측정이 아니라 오류로 집계
+
+
+def test_cli_exits_nonzero_when_no_valid_measurement(synth_dir, tmp_path):
+    # 이미지 0장 폴더에서 성공 종료하면 "측정 0건인데 녹색" — Phase 0 원칙 위반.
+    import subprocess, sys
+    from pathlib import Path
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    repo = Path(__file__).resolve().parents[1]
+    for cmd in (
+        ["offset", "--ref", str(synth_dir / "golden.png"), "--images", str(empty)],
+        ["anchor", "--ref", str(synth_dir / "golden.png"), "--box", "700,495,80,90",
+         "--images", str(empty)],
+    ):
+        r = subprocess.run([sys.executable, "-m", "avap.preflight", *cmd],
+                           cwd=repo, capture_output=True, text=True, timeout=120)
+        assert r.returncode != 0, f"{cmd[0]}: 빈 폴더인데 성공 종료\n{r.stdout}"
+        assert "[FAIL]" in r.stdout

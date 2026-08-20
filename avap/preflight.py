@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from pathlib import Path
 
 import cv2
@@ -65,10 +66,14 @@ def estimate_pose(ref_bgr: np.ndarray, img_bgr: np.ndarray) -> dict:
     components are in the de-rotated frame — the magnitude is what sizes
     the search window, and that is preserved.
     """
+    if ref_bgr.shape[:2] != img_bgr.shape[:2]:
+        rh, rw = ref_bgr.shape[:2]; ih, iw = img_bgr.shape[:2]
+        raise ValueError(
+            f"해상도 불일치: ref {rw}x{rh} vs image {iw}x{ih} — 원본 크기가 달라도 "
+            f"다운스케일 후엔 같아져 가짜 측정이 나온다. 같은 카메라 설정의 세트인지 확인"
+        )
     ref, scale = _gray_small(ref_bgr)
     img, _ = _gray_small(img_bgr)
-    if ref.shape != img.shape:
-        raise ValueError(f"해상도 불일치: ref {ref.shape} vs image {img.shape}")
     win = cv2.createHanningWindow((ref.shape[1], ref.shape[0]), cv2.CV_32F)
 
     samples = []  # (angle, response, dx, dy)
@@ -145,6 +150,9 @@ def survey_offset(ref_path: Path, images_dir: Path, out_csv: Path | None) -> dic
 def score_anchor(ref_bgr: np.ndarray, box: tuple[int, int, int, int],
                  img_bgr: np.ndarray, margin: int) -> float:
     """Best NCC score of the reference patch inside a margin-expanded window."""
+    if ref_bgr.shape[:2] != img_bgr.shape[:2]:
+        rh, rw = ref_bgr.shape[:2]; ih, iw = img_bgr.shape[:2]
+        raise ValueError(f"해상도 불일치: ref {rw}x{rh} vs image {iw}x{ih}")
     x, y, w, h = box
     patch = cv2.cvtColor(ref_bgr[y:y + h, x:x + w], cv2.COLOR_BGR2GRAY)
     ih, iw = img_bgr.shape[:2]
@@ -187,14 +195,19 @@ def survey_anchor(ref_path: Path, box: tuple[int, int, int, int],
     for f in _image_files(images_dir):
         if f.resolve() == ref_path.resolve():
             continue
-        score = score_anchor(ref, box, imread_u(f), margin)
+        try:
+            score = score_anchor(ref, box, imread_u(f), margin)
+        except ValueError as e:
+            rows.append({"file": f.name, "error": str(e)})
+            continue
         rows.append({"file": f.name, "ncc": round(score, 4)})
         print(f"  {f.name}: NCC={score:.3f}")
 
-    summary = anchor_summary([r["ncc"] for r in rows])
+    summary = anchor_summary([r["ncc"] for r in rows if "error" not in r])
+    summary["n_error"] = sum(1 for r in rows if "error" in r)
     if out_csv is not None:
         with open(out_csv, "w", newline="", encoding="utf-8-sig") as fh:
-            w = csv.DictWriter(fh, fieldnames=["file", "ncc"])
+            w = csv.DictWriter(fh, fieldnames=["file", "ncc", "error"])
             w.writeheader()
             w.writerows(rows)
     return summary
@@ -228,6 +241,11 @@ def main() -> None:
         s = survey_offset(Path(args.ref), Path(args.images),
                           Path(args.out) if args.out else None)
         _print_summary("로딩 오차 분포 (탐색창·pose gate 근거)", s)
+        if s["n"] == 0:
+            # 이미지 0장·전량 저신뢰·전량 해상도 불일치 — 어느 쪽이든 측정은 없다.
+            print("[FAIL] 유효 측정 0건 — 이 요약으로는 아무것도 결정할 수 없다. "
+                  f"(저신뢰 {s['n_low_confidence']}건 / 오류 {s['n_error']}건)")
+            sys.exit(1)
         print("  -> recipe 권고: search 창은 max_shift보다 크게, "
               "max_rotation_deg는 theta_max + 여유")
     else:
@@ -237,6 +255,9 @@ def main() -> None:
         s = survey_anchor(Path(args.ref), box, Path(args.images),
                           args.margin, Path(args.out) if args.out else None)
         _print_summary("앵커 후보 점수 분포", s)
+        if s["n"] == 0:
+            print(f"[FAIL] 유효 측정 0건 — min_score 권고 불가. (오류 {s.get('n_error', 0)}건)")
+            sys.exit(1)
         print("  -> min_score_suggestion은 p5-0.10 초기 권고치 — 실운영 전 재확인")
 
 
