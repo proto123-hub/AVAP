@@ -70,7 +70,7 @@ jobs:
           python -m avap.synth --out /tmp/synth_a --n 30 --seed 1234 --golden
           python -m avap.synth --out /tmp/synth_b --n 30 --seed 1234 --golden
           python - <<'EOF'
-          import json, sys
+          import json, math, sys
           from pathlib import Path
           EXPECTED_N = 30  # 위 생성 명령의 --n 과 함께 바꿀 것
           a, b = Path("/tmp/synth_a"), Path("/tmp/synth_b")
@@ -81,13 +81,17 @@ jobs:
           sidecars = sorted(a.glob("synth_*.json"))
           if len(sidecars) != EXPECTED_N:
               print(f"[FAIL] 측정 사이드카 {len(sidecars)}개 != 기대 {EXPECTED_N}개"); sys.exit(1)
+          def finite_num(v):
+              return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
           for sc in sidecars:
               gt = json.loads(sc.read_text(encoding="utf-8"))
               pose = gt.get("pose", {})
-              if not all(k in pose for k in ("tx", "ty", "theta_deg")) \
-                      or "expected_verdict" not in gt \
+              # 키 존재만으론 pose가 null이어도 통과한다 — 값이 유한한 숫자여야
+              # "측정이 존재한다"가 성립한다.
+              if not all(finite_num(pose.get(k)) for k in ("tx", "ty", "theta_deg")) \
+                      or gt.get("expected_verdict") not in ("PASS", "FAIL") \
                       or gt.get("benchmark_kind") != "synthetic":
-                  print(f"[FAIL] 사이드카 필드 불량: {sc.name} — {sorted(gt)}"); sys.exit(1)
+                  print(f"[FAIL] 사이드카 필드 불량: {sc.name} — {gt}"); sys.exit(1)
           if list(fa) != list(fb):
               print("[FAIL] 파일 목록 불일치"); sys.exit(1)
           diff = [n for n in fa if fa[n] != fb[n]]

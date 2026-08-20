@@ -128,6 +128,13 @@ class Recipe:
 # allowed (documentation convention), never consumed by code. Anything else
 # not listed here fails the load: an unknown key is either a typo or a
 # parameter nothing consumes, and both must be loud (L1).
+#
+# L1 metadata exceptions (judgment never reads these; they are provenance,
+# not tunable parameters, so sensitivity probes do not apply):
+#   - top-level "provenance": free-form JSON object (author, dates, ...)
+#   - "alignment.min_score_basis": calibration basis record (golden_n, p5,
+#     margin) — documents WHERE min_score came from, does not change it.
+# Both must still BE objects; their contents are covered by the fingerprint.
 ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "": frozenset({"avap_recipe", "meta", "golden", "alignment", "rois", "provenance"}),
     "meta": frozenset({"recipe_id", "recipe_version", "fingerprint",
@@ -135,14 +142,35 @@ ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "golden": frozenset({"image_sha", "size"}),
     "alignment": frozenset({"method", "anchors", "pose_gates", "min_score_basis"}),
     "alignment.min_score_basis": frozenset({"golden_n", "p5", "margin"}),
-    "alignment.anchors[]": frozenset({"id", "patch", "origin", "search",
-                                      "min_score", "required"}),
+    # "required"는 Phase 1 정렬 엔진이 실제로 소비할 때 재도입 — 지금 넣으면
+    # 검증만 하고 모델에서 버려지는 죽은 파라미터다 (L1).
+    "alignment.anchors[]": frozenset({"id", "patch", "origin", "search", "min_score"}),
     "alignment.pose_gates": frozenset({"max_shift_frac", "max_rotation_deg",
                                        "anchor_dist_tol_frac", "scale_tol"}),
     "rois[]": frozenset({"id", "label", "rect_golden", "detect", "rules"}),
     "rois[].detect": frozenset({"space", "lower", "upper", "morph"}),
     "rois[].detect.morph": frozenset({"kernel", "size", "open_iter", "close_iter"}),
 }
+
+
+def _dict_of(errors: list[str], where: str, value: Any) -> dict:
+    """Coerce a block to a dict; a present non-object is a validation error,
+    never an AttributeError crash further down."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    errors.append(f"{where}: JSON 객체여야 함 — {type(value).__name__} {value!r}")
+    return {}
+
+
+def _list_of(errors: list[str], where: str, value: Any) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    errors.append(f"{where}: JSON 배열이어야 함 — {type(value).__name__} {value!r}")
+    return []
 
 
 def _check_unknown_keys(errors: list[str], where: str, block: Any, allowed_id: str) -> None:
@@ -226,7 +254,9 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
 def compute_fingerprint(data: dict) -> str:
     """sha256 prefix over the canonical recipe body, excluding meta.fingerprint."""
     body = json.loads(json.dumps(data))  # deep copy
-    body.get("meta", {}).pop("fingerprint", None)
+    meta = body.get("meta")
+    if isinstance(meta, dict):  # 비정상 타입은 검증이 잡는다 — 지문 계산은 크래시 금지
+        meta.pop("fingerprint", None)
     canonical = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
 
@@ -244,11 +274,14 @@ def load_recipe(path: str | Path) -> Recipe:
 
 
 def parse_recipe(data: dict) -> Recipe:
+    if not isinstance(data, dict):
+        raise RecipeError(f"recipe 루트는 JSON 객체여야 함 — {type(data).__name__}")
     errors: list[str] = []
 
     _check_unknown_keys(errors, "", data, "")
-    _check_unknown_keys(errors, "meta", data.get("meta"), "meta")
-    _check_unknown_keys(errors, "golden", data.get("golden"), "golden")
+    prov = data.get("provenance")
+    if prov is not None and not isinstance(prov, dict):
+        errors.append(f"provenance: JSON 객체여야 함 — {type(prov).__name__} {prov!r}")
 
     if data.get("avap_recipe") != RECIPE_SCHEMA_VERSION:
         errors.append(
@@ -256,7 +289,8 @@ def parse_recipe(data: dict) -> Recipe:
             f"(지원: {RECIPE_SCHEMA_VERSION})"
         )
 
-    meta = data.get("meta", {})
+    meta = _dict_of(errors, "meta", data.get("meta"))
+    _check_unknown_keys(errors, "meta", meta, "meta")
     recipe_id = meta.get("recipe_id")
     if not recipe_id:
         errors.append("meta.recipe_id 누락")
@@ -264,7 +298,8 @@ def parse_recipe(data: dict) -> Recipe:
     if not isinstance(version, int) or version < 1:
         errors.append(f"meta.recipe_version은 1 이상의 정수여야 함 — {version!r}")
 
-    golden = data.get("golden", {})
+    golden = _dict_of(errors, "golden", data.get("golden"))
+    _check_unknown_keys(errors, "golden", golden, "golden")
     golden_sha = golden.get("image_sha", "")
     size = golden.get("size")
     if (not isinstance(size, list)) or len(size) != 2 or not all(
@@ -274,22 +309,29 @@ def parse_recipe(data: dict) -> Recipe:
         size = [1, 1]
 
     # alignment
-    al = data.get("alignment", {})
+    al = _dict_of(errors, "alignment", data.get("alignment"))
     _check_unknown_keys(errors, "alignment", al, "alignment")
-    _check_unknown_keys(errors, "alignment.min_score_basis",
-                        al.get("min_score_basis"), "alignment.min_score_basis")
+    msb = _dict_of(errors, "alignment.min_score_basis", al.get("min_score_basis"))
+    _check_unknown_keys(errors, "alignment.min_score_basis", msb, "alignment.min_score_basis")
+    gn = msb.get("golden_n")
+    if gn is not None and (not isinstance(gn, int) or isinstance(gn, bool) or gn < 0):
+        errors.append(f"alignment.min_score_basis.golden_n: 0 이상 정수여야 함 — {gn!r}")
+    for k in ("p5", "margin"):
+        v = msb.get(k)
+        if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool)
+                              or not (0.0 <= v <= 1.0)):
+            errors.append(f"alignment.min_score_basis.{k}: 0~1 이어야 함 — {v!r}")
     method = al.get("method")
     if method != "template_2anchor":
         errors.append(f"alignment.method 미지원: {method!r} (v1: template_2anchor)")
-    anchors_raw = al.get("anchors", [])
+    anchors_raw = _list_of(errors, "alignment.anchors", al.get("anchors"))
     anchors: list[Anchor] = []
     if len(anchors_raw) < 2:
         errors.append(f"alignment.anchors는 2개 이상이어야 함 — {len(anchors_raw)}개")
     for i, a in enumerate(anchors_raw):
         where = f"alignment.anchors[{i}]"
+        a = _dict_of(errors, where, a)
         _check_unknown_keys(errors, where, a, "alignment.anchors[]")
-        if "required" in a and not isinstance(a["required"], bool):
-            errors.append(f"{where}.required: true/false 여야 함 — {a['required']!r}")
         for k in ("id", "patch", "origin", "search"):
             if k not in a:
                 errors.append(f"{where}: '{k}' 누락")
@@ -320,7 +362,7 @@ def parse_recipe(data: dict) -> Recipe:
                 f"{MIN_ANCHOR_SEPARATION_FRAC} — 회전 정밀도가 무너짐 (§4.4)"
             )
 
-    gates = al.get("pose_gates", {})
+    gates = _dict_of(errors, "alignment.pose_gates", al.get("pose_gates"))
     _check_unknown_keys(errors, "alignment.pose_gates", gates, "alignment.pose_gates")
     _check_frac(errors, "pose_gates.max_shift_frac", gates.get("max_shift_frac", 0.05))
     _check_frac(errors, "pose_gates.anchor_dist_tol_frac",
@@ -333,21 +375,23 @@ def parse_recipe(data: dict) -> Recipe:
         )
 
     # rois
-    rois_raw = data.get("rois", [])
+    rois_raw = _list_of(errors, "rois", data.get("rois"))
     if not rois_raw:
         errors.append("rois가 비어 있음 — 검사 항목 0개 recipe는 저장 불가")
     rois: list[Roi] = []
     for i, r in enumerate(rois_raw):
         where = f"rois[{i}]"
+        r = _dict_of(errors, where, r)
         roi_id = r.get("id") or f"roi_{i}"
         _check_unknown_keys(errors, where, r, "rois[]")
         _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
-        detect = r.get("detect", {})
+        detect = _dict_of(errors, f"{where}.detect", r.get("detect"))
         _check_unknown_keys(errors, f"{where}.detect", detect, "rois[].detect")
         if detect.get("space", "hsv") != "hsv":
             errors.append(f"{where}.detect.space 미지원: {detect.get('space')!r} (v1: hsv)")
-        morph = detect.get("morph")
-        if morph is not None:
+        morph_raw = detect.get("morph")
+        morph = _dict_of(errors, f"{where}.detect.morph", morph_raw)
+        if morph_raw is not None and morph:
             _check_unknown_keys(errors, f"{where}.detect.morph", morph, "rois[].detect.morph")
             if morph.get("kernel", "ellipse") not in ("ellipse", "rect", "cross"):
                 errors.append(f"{where}.detect.morph.kernel 미지원: {morph.get('kernel')!r}")
@@ -364,12 +408,13 @@ def parse_recipe(data: dict) -> Recipe:
                 isinstance(x, (int, float)) and 0.0 <= x <= 1.0 for x in v
             ):
                 errors.append(f"{where}.detect.{bound}: [h, s, v] 각 0~1 이어야 함 (L7) — {v!r}")
-        rules_raw = r.get("rules", [])
+        rules_raw = _list_of(errors, f"{where}.rules", r.get("rules"))
         if not rules_raw:
             errors.append(f"{where}: rules가 비어 있음")
         rules: list[Rule] = []
         for j, rule in enumerate(rules_raw):
             rwhere = f"{where}.rules[{j}]"
+            rule = _dict_of(errors, rwhere, rule)
             tool = rule.get("tool")
             params = {k: v for k, v in rule.items() if k != "tool"}
             if tool is None:

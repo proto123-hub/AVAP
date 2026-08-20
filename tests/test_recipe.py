@@ -145,3 +145,73 @@ def test_bad_morph_rejected():
     d["rois"][0]["detect"]["morph"]["size"] = 0
     with pytest.raises(RecipeError, match="morph.size"):
         parse_recipe(d)
+
+
+# ── 2차 외부 검증 반영: 타입 가드 + required 제거 + 메타데이터 예외 타입화 ──
+
+def test_min_score_basis_non_object_rejected_not_crash():
+    # 이전에는 "garbage" 문자열이 조용히 통과했다 (미지 키 검사가 non-dict를 스킵)
+    d = _sample_dict()
+    d["alignment"]["min_score_basis"] = "garbage"
+    with pytest.raises(RecipeError, match="min_score_basis.*객체여야 함"):
+        parse_recipe(d)
+
+
+def test_morph_string_gives_recipe_error_not_attribute_error():
+    # 이전에는 morph: "ellipse"가 RecipeError 대신 AttributeError로 충돌했다
+    d = _sample_dict()
+    d["rois"][0]["detect"]["morph"] = "ellipse"
+    with pytest.raises(RecipeError, match="morph.*객체여야 함"):
+        parse_recipe(d)
+
+
+def test_non_object_blocks_rejected_everywhere():
+    for path_desc, mutate in [
+        ("meta", lambda d: d.__setitem__("meta", "x")),
+        ("golden", lambda d: d.__setitem__("golden", 3)),
+        ("alignment", lambda d: d.__setitem__("alignment", [1])),
+        ("pose_gates", lambda d: d["alignment"].__setitem__("pose_gates", "wide")),
+        ("provenance", lambda d: d.__setitem__("provenance", "me")),
+        ("anchors 원소", lambda d: d["alignment"]["anchors"].__setitem__(0, "a")),
+        ("rois 원소", lambda d: d["rois"].__setitem__(0, 7)),
+    ]:
+        d = _sample_dict()
+        mutate(d)
+        with pytest.raises(RecipeError, match="객체여야 함|배열이어야 함"), \
+                _no_crash(path_desc):
+            parse_recipe(d)
+
+
+import contextlib
+
+@contextlib.contextmanager
+def _no_crash(desc):
+    try:
+        yield
+    except RecipeError:
+        raise
+    except Exception as e:  # AttributeError 등으로 새면 검증기 결함
+        raise AssertionError(f"{desc}: RecipeError가 아닌 {type(e).__name__} — {e}")
+
+
+def test_root_must_be_object():
+    with pytest.raises(RecipeError, match="루트"):
+        parse_recipe([1, 2])
+
+
+def test_anchor_required_key_now_rejected_as_dead_param():
+    # hardening 1차에서 required를 검증 후 모델에서 버렸다 — 그 자체가 새 죽은
+    # 파라미터(L1 위반, 외부 검증 발견). 정렬 엔진이 소비하는 Phase 1까지 금지.
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["required"] = True
+    with pytest.raises(RecipeError, match="알 수 없는 키 'required'"):
+        parse_recipe(d)
+
+
+def test_min_score_basis_field_values_validated():
+    for key, bad in (("golden_n", -1), ("p5", 2.0), ("margin", -0.1)):
+        d = _sample_dict()
+        d["alignment"]["min_score_basis"] = {"golden_n": 30, "p5": 0.8, "margin": 0.1}
+        d["alignment"]["min_score_basis"][key] = bad
+        with pytest.raises(RecipeError, match=f"min_score_basis.{key}"):
+            parse_recipe(d)

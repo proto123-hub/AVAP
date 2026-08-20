@@ -57,3 +57,19 @@ def test_zero_n_rejected():
     import pytest
     with pytest.raises(ValueError, match="1 이상"):
         generate_set("/tmp/should_not_exist_avap", n=0)
+
+
+def test_sidecar_pose_values_are_finite_numbers(tmp_path):
+    # CI의 "측정 존재" 검사와 같은 기준 — pose가 null/NaN이면 측정이 아니다.
+    import json, math
+    from avap.synth import generate_set
+    generate_set(tmp_path, n=4, seed=3)
+    sidecars = sorted(tmp_path.glob("synth_*.json"))
+    assert sidecars
+    for sc in sidecars:
+        gt = json.loads(sc.read_text(encoding="utf-8"))
+        for k in ("tx", "ty", "theta_deg"):
+            v = gt["pose"][k]
+            assert isinstance(v, (int, float)) and not isinstance(v, bool) \
+                and math.isfinite(v), f"{sc.name}.pose.{k} = {v!r}"
+        assert gt["expected_verdict"] in ("PASS", "FAIL")
