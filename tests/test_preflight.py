@@ -7,8 +7,11 @@ number source (Design Law L5 in spirit).
 import json
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
+from avap import preflight as P
 from avap.io_utils import imread_u
 from avap.preflight import estimate_pose, score_anchor, survey_anchor, survey_offset
 from avap.synth import BOSS_B, BOSS_R, generate_set, write_golden
@@ -179,3 +182,80 @@ def test_cli_stdout_survives_cp949(synth_dir, tmp_path):
         assert "UnicodeEncodeError" not in r.stderr, f"{args[0]}: CP949 크래시\n{r.stderr}"
         assert (r.returncode == 0) == expect_ok, \
             f"{args}: rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+
+
+# ── Anchor picking: the box handed to `anchor` must always be usable ──────
+
+def test_view_scale_never_upscales_a_small_image():
+    assert P.view_scale((400, 600, 3)) == 1.0
+
+
+def test_view_scale_fits_both_dimensions():
+    # A tall frame must be limited by height, not width.
+    s = P.view_scale((4000, 1000, 3))
+    assert s * 4000 <= P.PICK_MAX_H + 1e-9
+    assert s * 1000 <= P.PICK_MAX_W + 1e-9
+
+
+def test_box_maps_back_unchanged_at_full_scale():
+    assert P.box_to_source((10, 20, 30, 40), 1.0, (500, 500, 3)) == (10, 20, 30, 40)
+
+
+def test_box_edges_are_mapped_not_the_size():
+    # Scaling w/h independently drifts the far edge; mapping both edges does not.
+    x, y, w, h = P.box_to_source((100, 50, 33, 27), 0.5, (2000, 2000, 3))
+    assert (x, y) == (200, 100)
+    assert (x + w, y + h) == (266, 154)
+
+
+def test_picked_box_always_satisfies_the_anchor_precondition():
+    # score_anchor() rejects a box that leaves the reference image. The picker
+    # feeds that function directly, so every box it can emit must pass.
+    rng = np.random.default_rng(20260821)
+    shape = (1200, 1600, 3)
+    ref = rng.integers(0, 255, shape, dtype=np.uint8)
+    for _ in range(300):
+        scale = float(rng.uniform(0.1, 1.0))
+        # Deliberately includes boxes drawn past the edge of the view.
+        view_box = tuple(int(v) for v in rng.integers(-50, 1800, 4))
+        x, y, w, h = P.box_to_source(view_box, scale, shape)
+        assert w >= 1 and h >= 1
+        assert 0 <= x and 0 <= y
+        assert x + w <= shape[1] and y + h <= shape[0]
+        # The real contract: the very next command accepts it.
+        P.score_anchor(ref, (x, y, w, h), ref, margin=10)
+
+
+def test_anchors_too_close_together_are_rejected():
+    shape = (1000, 1000, 3)
+    ok, note = P.anchor_separation_note([(10, 10, 20, 20), (40, 40, 20, 20)], shape)
+    assert not ok
+    assert "경고" in note
+
+
+def test_well_separated_anchors_pass():
+    shape = (1000, 1000, 3)
+    ok, note = P.anchor_separation_note([(20, 20, 40, 40), (900, 900, 40, 40)], shape)
+    assert ok
+
+
+def test_exactly_two_anchors_are_required():
+    ok, note = P.anchor_separation_note([(0, 0, 10, 10)], (100, 100, 3))
+    assert not ok
+    assert "2개" in note
+
+
+def test_missing_display_reports_guidance_not_an_opencv_traceback(tmp_path, monkeypatch):
+    # A headless build throws from selectROIs AND from destroyAllWindows. The
+    # second one used to escape the finally block and bury the first message.
+    from avap.synth import write_golden
+    ref = write_golden(tmp_path / "golden.png")
+
+    def boom(*a, **k):
+        raise cv2.error("headless")
+    monkeypatch.setattr(cv2, "selectROIs", boom)
+    monkeypatch.setattr(cv2, "destroyAllWindows", boom)
+
+    with pytest.raises(RuntimeError) as e:
+        P.pick_anchors(ref)
+    assert "--box" in str(e.value)

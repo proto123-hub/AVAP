@@ -14,6 +14,24 @@ python -m pytest -q                          # 테스트 전체
 python -m avap.synth --out output/synth --golden   # 합성 벤치마크 생성 (결정적)
 ```
 
+## Phase 0.5 사전 조사 (실사 이미지가 있는 PC에서)
+
+정렬 엔진의 탐색창 크기·게이트 값은 추정이 아니라 실측에서 나온다. Position 폴더별로:
+
+```bash
+# 1. 로딩 오차 분포 - 제품이 실제로 얼마나 움직이는가
+python -m avap.preflight offset --ref <골든> --images <폴더> --out offset.csv
+
+# 2. 앵커 박스 2개 지정 (도포 영역 '밖'의 안정적 랜드마크)
+python -m avap.preflight pick --ref <골든>
+
+# 3. 앵커별 NCC 점수 분포 - min_score의 근거
+python -m avap.preflight anchor --ref <골든> --box x,y,w,h --images <폴더> --out anchor1.csv
+```
+
+`pick`은 원본 픽셀 좌표와 이어서 붙여넣을 `anchor` 명령을 그대로 출력한다.
+앵커 간격이 부족하면(2점 강체 추정의 각도 정밀도가 목표 미달) 경고하고 exit 1.
+
 ## 현재 상태
 
 Phase 0 (골격·안전망): 유니코드 안전 이미지 IO · recipe 로더+스키마 검증(죽은 파라미터 거부) · 합성 벤치마크 생성기(랜덤 pose + GT 사이드카) · CI 3 job.
