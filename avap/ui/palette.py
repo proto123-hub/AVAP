@@ -26,8 +26,10 @@ from dataclasses import dataclass
 BODY_MIN = 4.5
 UI_MIN = 3.0
 # Disabled controls are formally exempt from 1.4.3. We decline the exemption:
-# a greyed-out Inspect button has to explain why it cannot be pressed.
-DISABLED_MIN = 3.0
+# a greyed-out Inspect button has to explain why it cannot be pressed. Declining
+# it means the body-text target, not the UI one - setting 3.0 here would have
+# granted in numbers exactly the exemption this comment refuses.
+DISABLED_MIN = BODY_MIN
 # Upper bound. Near-white on near-black haloes on emissive panels and tires
 # the eye over a shift; this stops a later "improvement" to #FFFFFF on #000000.
 BODY_MAX = 17.0
@@ -60,7 +62,11 @@ _FOREGROUNDS = {
     "TEXT_SECONDARY": Colour(
         "#B4B4B4", "Units, threshold labels, column headers, hints", _ALL_BG),
     "TEXT_DISABLED": Colour(
-        "#8A8A8A", "Disabled control labels", _ALL_BG, DISABLED_MIN),
+        "#9C9C9C",
+        "Disabled control labels. #8A8A8A managed only 3.66 on BG_HOVER, below "
+        "the target above. Disabled-ness is carried by the control (flat fill, "
+        "no hover, no focus ring), never by dimming the label out of legibility",
+        _ALL_BG, DISABLED_MIN),
     "BORDER_STRONG": Colour(
         "#808080", "Input outline, panel edge, scrollbar handle, ROI edit handle", _ALL_BG, UI_MIN),
     "ACCENT": Colour(
@@ -125,6 +131,9 @@ MASK_TINT_ALPHA = 0.35      # detection mask fill. Never the only cue —
                             # an ACCENT outline must accompany it
 SEPARATOR_ALPHA = 0.45      # decorative rules, derived from BORDER_STRONG
 
+# Qt draws these; they are not console output. Neither glyph exists in CP949,
+# so a CLI that prints a verdict must map them to ASCII rather than reuse
+# this table - a Windows Korean console raises on the raw character.
 VERDICT_GLYPH = {"PASS": "✓", "FAIL": "✕", "UNKNOWN": "?"}
 
 # AA is the gate; AAA (7:1) is reported, not enforced. Forcing every pair to
@@ -133,6 +142,11 @@ VERDICT_GLYPH = {"PASS": "✓", "FAIL": "✕", "UNKNOWN": "?"}
 # An exemption list was tried instead and reached six entries, at which point
 # it documents the palette rather than constraining it.
 AAA_GOAL = 7.0
+
+# Verdict cards must stay this far apart for a dichromat, not just for a
+# standard observer. 3.0 is the 1.4.11 graphics threshold: the card is a
+# surface, not body text.
+CVD_MIN = 3.0
 
 
 # ── Colour maths ─────────────────────────────────────────────────────────
@@ -172,6 +186,40 @@ def contrast(a: str, b: str) -> float:
     if la < lb:
         la, lb = lb, la
     return (la + 0.05) / (lb + 0.05)
+
+
+# Vienot, Brettel & Mollon (1999) reduced dichromat matrices, applied in
+# LINEAR RGB. Used only to check the palette, never to draw: the point is to
+# prove the verdict cards stay apart for a dichromat rather than to assert it
+# in a comment. tests/test_palette.py verifies these behave like a projection
+# (idempotent, greys invariant, blue axis preserved) before trusting them.
+CVD_MATRICES = {
+    "protanopia": ((0.11238, 0.88762, 0.0),
+                   (0.11238, 0.88762, 0.0),
+                   (0.00401, -0.00401, 1.0)),
+    "deuteranopia": ((0.29275, 0.70725, 0.0),
+                     (0.29275, 0.70725, 0.0),
+                     (-0.02234, 0.02234, 1.0)),
+}
+
+
+def _to_srgb(value: float) -> int:
+    v = min(1.0, max(0.0, value))
+    v = v * 12.92 if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+    return int(round(v * 255))
+
+
+def simulate_cvd(token_or_hex: str, kind: str) -> str:
+    """How a dichromat sees this colour, as #RRGGBB."""
+    m = CVD_MATRICES[kind]
+    src = [_linear(c) for c in rgb(token_or_hex)]
+    out = [sum(row[i] * src[i] for i in range(3)) for row in m]
+    return "#{:02X}{:02X}{:02X}".format(*(_to_srgb(v) for v in out))
+
+
+def cvd_contrast(a: str, b: str, kind: str) -> float:
+    """Contrast ratio between two colours as a dichromat sees them."""
+    return contrast(simulate_cvd(a, kind), simulate_cvd(b, kind))
 
 
 def composite(fg: str, bg: str, alpha: float) -> str:
