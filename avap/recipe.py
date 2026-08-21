@@ -2,7 +2,7 @@
 
 Design Laws enforced here (docs/DESIGN.md §2):
 - L1 (schema side): every rule parameter must be declared in PARAM_SPECS for
-  its tool — an unknown key fails the load, so a parameter with no consumer
+  its tool - an unknown key fails the load, so a parameter with no consumer
   cannot exist. (Judgment-side sensitivity probes arrive with the tools in
   Phase 2.)
 - L5: fingerprints are sha256 prefixes, verified on load when present.
@@ -59,7 +59,7 @@ class RecipeError(ValueError):
 #   tool -> key -> (kind, lo, hi, required)
 # kind: "frac" 0..1 float · "int" · "float" · "hsv" [h,s,v] each 0..1
 # UI widgets, value collection and Advisor suggestions must all derive from
-# this table (Design Law L2) — never from a second hand-maintained list.
+# this table (Design Law L2) - never from a second hand-maintained list.
 PARAM_SPECS: dict[str, dict[str, tuple[str, float | None, float | None, bool]]] = {
     "blob": {
         "count_min": ("int", 0, 10000, True),
@@ -145,7 +145,7 @@ class Recipe:
 
 # ── Validation helpers ───────────────────────────────────────────────────
 
-# Allowed keys per block. Keys starting with "_" are annotations — always
+# Allowed keys per block. Keys starting with "_" are annotations - always
 # allowed (documentation convention), never consumed by code. Anything else
 # not listed here fails the load: an unknown key is either a typo or a
 # parameter nothing consumes, and both must be loud (L1).
@@ -154,7 +154,7 @@ class Recipe:
 # not tunable parameters, so sensitivity probes do not apply):
 #   - top-level "provenance": free-form JSON object (author, dates, ...)
 #   - "alignment.min_score_basis": calibration basis record (golden_n, p5,
-#     margin) — documents WHERE min_score came from, does not change it.
+#     margin) - documents WHERE min_score came from, does not change it.
 # Both must still BE objects; their contents are covered by the fingerprint.
 ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "": frozenset({"avap_recipe", "meta", "golden", "alignment", "rois", "provenance"}),
@@ -163,7 +163,7 @@ ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "golden": frozenset({"image_sha", "size"}),
     "alignment": frozenset({"method", "anchors", "pose_gates", "min_score_basis"}),
     "alignment.min_score_basis": frozenset({"golden_n", "p5", "margin"}),
-    # "required"는 Phase 1 정렬 엔진이 실제로 소비할 때 재도입 — 지금 넣으면
+    # "required"는 Phase 1 정렬 엔진이 실제로 소비할 때 재도입 - 지금 넣으면
     # 검증만 하고 모델에서 버려지는 죽은 파라미터다 (L1).
     "alignment.anchors[]": frozenset({"id", "patch", "origin", "search", "min_score"}),
     "alignment.pose_gates": frozenset({"max_shift_frac", "max_rotation_deg",
@@ -175,7 +175,7 @@ ALLOWED_KEYS: dict[str, frozenset[str]] = {
 
 
 # Distinguishes an absent key from an explicit null: absence falls back to
-# defaults, but a written "key": null is an authored value and must be loud —
+# defaults, but a written "key": null is an authored value and must be loud -
 # silently substituting defaults is how dead configuration is born.
 _MISSING = object()
 
@@ -188,7 +188,7 @@ def _dict_of(errors: list[str], where: str, value: Any) -> dict:
     if isinstance(value, dict):
         return value
     kind = "null" if value is None else type(value).__name__
-    errors.append(f"{where}: JSON 객체여야 함 — {kind} {value!r} "
+    errors.append(f"{where}: JSON 객체여야 함 - {kind} {value!r} "
                   "(생략하려면 키 자체를 빼라)")
     return {}
 
@@ -199,7 +199,7 @@ def _list_of(errors: list[str], where: str, value: Any) -> list:
     if isinstance(value, list):
         return value
     kind = "null" if value is None else type(value).__name__
-    errors.append(f"{where}: JSON 배열이어야 함 — {kind} {value!r}")
+    errors.append(f"{where}: JSON 배열이어야 함 - {kind} {value!r}")
     return []
 
 
@@ -212,14 +212,14 @@ def _check_unknown_keys(errors: list[str], where: str, block: Any, allowed_id: s
             continue  # annotation
         if key not in allowed:
             errors.append(
-                f"{where or 'recipe'}: 알 수 없는 키 '{key}' — 오타이거나 소비자 없는 "
+                f"{where or 'recipe'}: 알 수 없는 키 '{key}' - 오타이거나 소비자 없는 "
                 f"파라미터 (L1). 허용: {', '.join(sorted(allowed))} (주석은 '_' 접두)"
             )
 
 
 def _check_frac(errors: list[str], where: str, value: Any, hi: float = 1.0) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0.0 < value <= hi):
-        errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) — {value!r}")
+        errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) - {value!r}")
 
 
 def _freeze(d: dict) -> tuple[tuple[str, Any], ...]:
@@ -238,13 +238,13 @@ def _check_rect(errors: list[str], where: str, rect: Any) -> None:
     if (not isinstance(rect, list)) or len(rect) != 4 or not all(
         isinstance(v, (int, float)) for v in rect
     ):
-        errors.append(f"{where}: [x, y, w, h] 4개 숫자여야 함 — {rect!r}")
+        errors.append(f"{where}: [x, y, w, h] 4개 숫자여야 함 - {rect!r}")
         return
     x, y, w, h = rect
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
-        errors.append(f"{where}: 좌표는 0~1 분수여야 함 (L7) — {rect!r}")
+        errors.append(f"{where}: 좌표는 0~1 분수여야 함 (L7) - {rect!r}")
     elif x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
-        errors.append(f"{where}: 사각형이 골든 프레임을 벗어남 — {rect!r}")
+        errors.append(f"{where}: 사각형이 골든 프레임을 벗어남 - {rect!r}")
 
 
 def _check_params(errors: list[str], where: str, tool: str, params: dict) -> None:
@@ -257,7 +257,7 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
     for key, value in params.items():
         if key not in spec:
             errors.append(
-                f"{where}: tool '{tool}'이 소비하지 않는 파라미터 '{key}' — "
+                f"{where}: tool '{tool}'이 소비하지 않는 파라미터 '{key}' - "
                 f"죽은 파라미터 금지 (L1). 허용 키: {', '.join(sorted(spec))}"
             )
             continue
@@ -266,16 +266,16 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             if (not isinstance(value, list)) or len(value) != 3 or not all(
                 isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in value
             ):
-                errors.append(f"{where}.{key}: [h, s, v] 각 0~1 이어야 함 — {value!r}")
+                errors.append(f"{where}.{key}: [h, s, v] 각 0~1 이어야 함 - {value!r}")
             continue
         if not isinstance(value, (int, float)) or isinstance(value, bool):
-            errors.append(f"{where}.{key}: 숫자여야 함 — {value!r}")
+            errors.append(f"{where}.{key}: 숫자여야 함 - {value!r}")
             continue
         if kind == "int" and int(value) != value:
-            errors.append(f"{where}.{key}: 정수여야 함 — {value!r}")
+            errors.append(f"{where}.{key}: 정수여야 함 - {value!r}")
         if lo is not None and hi is not None and not (lo <= value <= hi):
             unit = " (0~1 분수, L7)" if kind == "frac" else ""
-            errors.append(f"{where}.{key}: 범위 [{lo}, {hi}] 밖{unit} — {value!r}")
+            errors.append(f"{where}.{key}: 범위 [{lo}, {hi}] 밖{unit} - {value!r}")
     for key, (_kind, _lo, _hi, required) in spec.items():
         if required and key not in params:
             errors.append(f"{where}: tool '{tool}'의 필수 파라미터 '{key}' 누락")
@@ -285,7 +285,7 @@ def compute_fingerprint(data: dict) -> str:
     """sha256 prefix over the canonical recipe body, excluding meta.fingerprint."""
     body = json.loads(json.dumps(data))  # deep copy
     meta = body.get("meta")
-    if isinstance(meta, dict):  # 비정상 타입은 검증이 잡는다 — 지문 계산은 크래시 금지
+    if isinstance(meta, dict):  # 비정상 타입은 검증이 잡는다 - 지문 계산은 크래시 금지
         meta.pop("fingerprint", None)
     canonical = json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:FINGERPRINT_LEN]
@@ -299,20 +299,20 @@ def load_recipe(path: str | Path) -> Recipe:
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
-        raise RecipeError(f"recipe 읽기 실패: {p} — {e}") from e
+        raise RecipeError(f"recipe 읽기 실패: {p} - {e}") from e
     return parse_recipe(data)
 
 
 def parse_recipe(data: dict) -> Recipe:
     if not isinstance(data, dict):
-        raise RecipeError(f"recipe 루트는 JSON 객체여야 함 — {type(data).__name__}")
+        raise RecipeError(f"recipe 루트는 JSON 객체여야 함 - {type(data).__name__}")
     errors: list[str] = []
 
     _check_unknown_keys(errors, "", data, "")
     prov = data.get("provenance", _MISSING)
     if prov is not _MISSING and not isinstance(prov, dict):
         kind = "null" if prov is None else type(prov).__name__
-        errors.append(f"provenance: JSON 객체여야 함 — {kind} {prov!r}")
+        errors.append(f"provenance: JSON 객체여야 함 - {kind} {prov!r}")
 
     if data.get("avap_recipe") != RECIPE_SCHEMA_VERSION:
         errors.append(
@@ -327,7 +327,7 @@ def parse_recipe(data: dict) -> Recipe:
         errors.append("meta.recipe_id 누락")
     version = meta.get("recipe_version")
     if not isinstance(version, int) or version < 1:
-        errors.append(f"meta.recipe_version은 1 이상의 정수여야 함 — {version!r}")
+        errors.append(f"meta.recipe_version은 1 이상의 정수여야 함 - {version!r}")
 
     golden = _dict_of(errors, "golden", data.get("golden", _MISSING))
     _check_unknown_keys(errors, "golden", golden, "golden")
@@ -336,7 +336,7 @@ def parse_recipe(data: dict) -> Recipe:
     if (not isinstance(size, list)) or len(size) != 2 or not all(
         isinstance(v, int) and v > 0 for v in size
     ):
-        errors.append(f"golden.size는 [width, height] 양의 정수여야 함 — {size!r}")
+        errors.append(f"golden.size는 [width, height] 양의 정수여야 함 - {size!r}")
         size = [1, 1]
 
     # alignment
@@ -347,19 +347,19 @@ def parse_recipe(data: dict) -> Recipe:
     _check_unknown_keys(errors, "alignment.min_score_basis", msb, "alignment.min_score_basis")
     gn = msb.get("golden_n")
     if gn is not None and (not isinstance(gn, int) or isinstance(gn, bool) or gn < 0):
-        errors.append(f"alignment.min_score_basis.golden_n: 0 이상 정수여야 함 — {gn!r}")
+        errors.append(f"alignment.min_score_basis.golden_n: 0 이상 정수여야 함 - {gn!r}")
     for k in ("p5", "margin"):
         v = msb.get(k)
         if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool)
                               or not (0.0 <= v <= 1.0)):
-            errors.append(f"alignment.min_score_basis.{k}: 0~1 이어야 함 — {v!r}")
+            errors.append(f"alignment.min_score_basis.{k}: 0~1 이어야 함 - {v!r}")
     method = al.get("method")
     if method != "template_2anchor":
         errors.append(f"alignment.method 미지원: {method!r} (v1: template_2anchor)")
     anchors_raw = _list_of(errors, "alignment.anchors", al.get("anchors", _MISSING))
     anchors: list[Anchor] = []
     if len(anchors_raw) < 2:
-        errors.append(f"alignment.anchors는 2개 이상이어야 함 — {len(anchors_raw)}개")
+        errors.append(f"alignment.anchors는 2개 이상이어야 함 - {len(anchors_raw)}개")
     for i, a in enumerate(anchors_raw):
         where = f"alignment.anchors[{i}]"
         a = _dict_of(errors, where, a)
@@ -371,7 +371,7 @@ def parse_recipe(data: dict) -> Recipe:
         _check_rect(errors, f"{where}.search", a.get("search", []))
         score = a.get("min_score", 0.7)
         if not isinstance(score, (int, float)) or not (0.0 < score <= 1.0):
-            errors.append(f"{where}.min_score: 0~1 이어야 함 — {score!r}")
+            errors.append(f"{where}.min_score: 0~1 이어야 함 - {score!r}")
         if not errors:
             anchors.append(
                 Anchor(
@@ -400,13 +400,13 @@ def parse_recipe(data: dict) -> Recipe:
     max_rot = gates.get("max_rotation_deg", 3.0)
     if not isinstance(max_rot, (int, float)) or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT):
         errors.append(
-            f"pose_gates.max_rotation_deg: 0~{MAX_ROTATION_DEG_LIMIT} 이어야 함 — {max_rot!r}"
+            f"pose_gates.max_rotation_deg: 0~{MAX_ROTATION_DEG_LIMIT} 이어야 함 - {max_rot!r}"
         )
 
     # rois
     rois_raw = _list_of(errors, "rois", data.get("rois", _MISSING))
     if not rois_raw:
-        errors.append("rois가 비어 있음 — 검사 항목 0개 recipe는 저장 불가")
+        errors.append("rois가 비어 있음 - 검사 항목 0개 recipe는 저장 불가")
     rois: list[Roi] = []
     for i, r in enumerate(rois_raw):
         where = f"rois[{i}]"
@@ -426,17 +426,17 @@ def parse_recipe(data: dict) -> Recipe:
                 errors.append(f"{where}.detect.morph.kernel 미지원: {morph.get('kernel')!r}")
             ksize = morph.get("size", 5)
             if not isinstance(ksize, int) or isinstance(ksize, bool) or not (1 <= ksize <= 99):
-                errors.append(f"{where}.detect.morph.size: 1~99 정수여야 함 — {ksize!r}")
+                errors.append(f"{where}.detect.morph.size: 1~99 정수여야 함 - {ksize!r}")
             for it in ("open_iter", "close_iter"):
                 v = morph.get(it, 1)
                 if not isinstance(v, int) or isinstance(v, bool) or not (0 <= v <= 10):
-                    errors.append(f"{where}.detect.morph.{it}: 0~10 정수여야 함 — {v!r}")
+                    errors.append(f"{where}.detect.morph.{it}: 0~10 정수여야 함 - {v!r}")
         for bound in ("lower", "upper"):
             v = detect.get(bound)
             if (not isinstance(v, list)) or len(v) != 3 or not all(
                 isinstance(x, (int, float)) and 0.0 <= x <= 1.0 for x in v
             ):
-                errors.append(f"{where}.detect.{bound}: [h, s, v] 각 0~1 이어야 함 (L7) — {v!r}")
+                errors.append(f"{where}.detect.{bound}: [h, s, v] 각 0~1 이어야 함 (L7) - {v!r}")
         rules_raw = _list_of(errors, f"{where}.rules", r.get("rules", _MISSING))
         if not rules_raw:
             errors.append(f"{where}: rules가 비어 있음")
@@ -466,7 +466,7 @@ def parse_recipe(data: dict) -> Recipe:
     declared = meta.get("fingerprint")
     if declared is not None and declared != expected:
         errors.append(
-            f"fingerprint 불일치: 선언 {declared!r} ≠ 계산 {expected!r} — "
+            f"fingerprint 불일치: 선언 {declared!r} ≠ 계산 {expected!r} - "
             "recipe 본문이 저장 후 변조됨 (L5)"
         )
 

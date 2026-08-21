@@ -3,6 +3,7 @@
 - io discipline: cv2.imread/imwrite only inside avap/io_utils.py (L6/io).
 - constants discipline: the shared change thresholds exist once (L3).
 """
+import ast
 import re
 from pathlib import Path
 
@@ -42,3 +43,43 @@ def test_requirements_is_ascii_only():
     from pathlib import Path
     raw = Path(__file__).resolve().parents[1].joinpath("requirements.txt").read_bytes()
     raw.decode("ascii")  # 비ASCII가 들어오면 UnicodeDecodeError로 실패
+
+
+# ── Console discipline: a message the operator must read must be printable ──
+
+def _non_docstring_literals(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every string literal except docstrings.
+
+    Docstrings never reach a console, so they may hold typographic characters.
+    Anything else might be raised, printed, or formatted into a message.
+    """
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                             ast.AsyncFunctionDef)):
+            body = getattr(node, "body", None)
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                docstrings.add(id(body[0].value))
+    return [(n.lineno, n.value) for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings]
+
+
+def test_operator_messages_survive_a_cp949_console():
+    # A Windows Korean console raises UnicodeEncodeError on characters CP949
+    # cannot encode, so an em dash in an error message crashes the tool at the
+    # exact moment the operator needs to read it. This project has already been
+    # bitten once; the rule is enforced rather than remembered.
+    offenders = []
+    for src in _sources():
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for line, text in _non_docstring_literals(tree):
+            bad = sorted({c for c in text
+                          if ord(c) > 127 and not c.encode("cp949", "ignore")})
+            if bad:
+                offenders.append(f"{src.name}:{line} {bad}")
+    assert not offenders, (
+        "CP949 콘솔에서 죽는 문자가 메시지에 있다:\n  " + "\n  ".join(offenders)
+    )
