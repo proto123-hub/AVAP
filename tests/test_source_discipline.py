@@ -33,3 +33,12 @@ def test_change_thresholds_defined_once():
         if pattern.search(src.read_text(encoding="utf-8")):
             offenders.append(src.name)
     assert not offenders, f"급변 임계 재정의 금지 (L3): {offenders}"
+
+
+def test_requirements_is_ascii_only():
+    # 깨끗한 Windows venv의 번들 pip는 이 파일을 로케일 코덱(CP949)으로 읽을 수 있어,
+    # 비ASCII 주석이 있으면 `pip install -r`이 설치 자체에 실패한다 (외부 검증 발견).
+    # CI는 pip를 먼저 업그레이드해 숨겨졌던 실패 모드 — 파일을 ASCII로 고정해 계급 전체를 차단.
+    from pathlib import Path
+    raw = Path(__file__).resolve().parents[1].joinpath("requirements.txt").read_bytes()
+    raw.decode("ascii")  # 비ASCII가 들어오면 UnicodeDecodeError로 실패

@@ -5,12 +5,12 @@
     "recipe_version": 1,
     "created_by": "avap-phase0",
     "created_at": "2026-08-20",
-    "note": "avap/synth.py 골든 이미지에 대응하는 참조 recipe — 로더·정렬·판정 테스트의 공용 픽스처"
+    "_note": "avap/synth.py 골든 이미지에 대응하는 참조 recipe — 로더·정렬·판정 테스트의 공용 픽스처"
   },
   "golden": {
     "image_sha": "unbound",
     "size": [960, 720],
-    "source": "python -m avap.synth --golden 으로 재생성 (저장소에 이미지 커밋 금지)"
+    "_source": "python -m avap.synth --golden 으로 재생성 (저장소에 이미지 커밋 금지)"
   },
   "alignment": {
     "method": "template_2anchor",
@@ -30,7 +30,7 @@
         "min_score": 0.7
       }
     ],
-    "min_score_basis": {"golden_n": 0, "note": "미보정 초기값 — OK 세트 p5-마진으로 갱신 예정"},
+    "min_score_basis": {"golden_n": 0, "_note": "미보정 초기값 — OK 세트 p5-마진으로 갱신 예정"},
     "pose_gates": {
       "max_shift_frac": 0.05,
       "max_rotation_deg": 3.0,
