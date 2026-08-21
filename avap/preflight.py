@@ -34,6 +34,7 @@ import numpy as np
 
 from avap.constants import MIN_ANCHOR_SEPARATION_FRAC
 from avap.io_utils import SUPPORTED_EXTS, imread_u
+from avap.recipe import anchor_separation_frac
 
 # Survey resolution: full frames are downscaled so FFTs stay fast; survey
 # precision (~1px at survey scale) is plenty for sizing search windows.
@@ -270,24 +271,31 @@ def anchor_separation_note(boxes: list[tuple[int, int, int, int]],
     """
     if len(boxes) != 2:
         return False, "앵커는 정확히 2개가 필요하다 (2점 강체 추정)."
+    h, w = shape[:2]
+    # Normalize per axis first, exactly as the recipe validator does. Measuring
+    # against the physical diagonal instead would green-light anchors the
+    # validator then rejects on any non-square frame.
+    norm = [(x / w, y / h, bw / w, bh / h) for x, y, bw, bh in boxes]
+    frac = anchor_separation_frac(norm[0], norm[1])
+
     (x0, y0, w0, h0), (x1, y1, w1, h1) = boxes
-    c0 = (x0 + w0 / 2, y0 + h0 / 2)
-    c1 = (x1 + w1 / 2, y1 + h1 / 2)
-    sep = math.hypot(c1[0] - c0[0], c1[1] - c0[1])
-    diag = math.hypot(shape[1], shape[0])
-    frac = sep / diag
-    theta_err = math.degrees(NCC_PEAK_ERROR_PX / sep) if sep > 0 else float("inf")
-    detail = (f"앵커 간격 {sep:.0f}px (대각선의 {frac * 100:.0f}%), "
+    sep_px = math.hypot((x1 + w1 / 2) - (x0 + w0 / 2), (y1 + h1 / 2) - (y0 + h0 / 2))
+    theta_err = math.degrees(NCC_PEAK_ERROR_PX / sep_px) if sep_px > 0 else float("inf")
+    detail = (f"앵커 간격 {sep_px:.0f}px (recipe 기준 {frac * 100:.1f}%), "
               f"NCC 1px 오차 기준 각도 정밀도 약 {theta_err:.2f}deg "
               f"(목표 {TARGET_THETA_DEG}deg)")
     if frac < MIN_ANCHOR_SEPARATION_FRAC:
         return False, (f"[경고] {detail}\n"
-                       f"  간격이 대각선의 {MIN_ANCHOR_SEPARATION_FRAC * 100:.0f}% 미만이라 "
-                       f"recipe 검증에서 거부된다. 더 멀리 떨어진 두 곳을 다시 고를 것.")
+                       f"  recipe 하한 {MIN_ANCHOR_SEPARATION_FRAC * 100:.0f}% 미만이라 "
+                       f"검증에서 거부된다. 더 멀리 떨어진 두 곳을 다시 고를 것.")
     if theta_err > TARGET_THETA_DEG:
-        return True, (f"[주의] {detail}\n"
-                      f"  간격 조건은 통과했으나 각도 정밀도가 목표에 못 미친다. "
-                      f"가능하면 더 멀리 떨어뜨릴 것.")
+        # Passing the recipe floor while missing the design target is still a
+        # fail: reporting "cannot meet the precision" and exiting 0 would be
+        # the documented-but-unenforced pattern this project keeps removing.
+        return False, (f"[경고] {detail}\n"
+                       f"  recipe 하한은 통과했으나 각도 정밀도가 목표에 못 미친다. "
+                       f"더 멀리 떨어뜨리거나, 감수하고 진행하려면 anchor 명령에 "
+                       f"--box 를 직접 지정할 것.")
     return True, f"[OK] {detail}"
 
 
@@ -307,9 +315,11 @@ def pick_anchors(ref_path: Path) -> list[tuple[int, int, int, int]]:
                                 view, showCrosshair=True)
     except cv2.error as e:
         raise RuntimeError(
-            "창을 열 수 없다 - 화면 없는 환경(SSH/서버/headless OpenCV)에서는 "
-            "pick을 쓸 수 없다. anchor 명령에 --box x,y,w,h 를 직접 지정할 것.\n"
-            f"  원인: {e}"
+            "창을 열 수 없다. requirements.txt는 opencv-python-headless(GUI 없음)를 "
+            "설치하므로 pick을 쓰려면 데스크톱용 OpenCV가 필요하다:\n"
+            "    pip install -r requirements-desktop.txt\n"
+            "  SSH/서버처럼 화면 자체가 없으면 anchor 명령에 --box x,y,w,h 를 직접 "
+            f"지정할 것.\n  원인: {e}"
         ) from e
     finally:
         # A headless build raises here too; letting that escape would bury the

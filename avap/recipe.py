@@ -29,6 +29,27 @@ from avap.constants import (
 )
 
 
+def anchor_separation_frac(box_a: tuple[float, float, float, float],
+                           box_b: tuple[float, float, float, float]) -> float:
+    """Distance between two anchor centres, as a fraction of the diagonal.
+
+    Boxes are in normalized [0,1] per-axis coordinates, so the longest
+    possible separation is sqrt(2); dividing by it makes the result a plain
+    0..1 fraction comparable to MIN_ANCHOR_SEPARATION_FRAC.
+
+    Exported because avap/preflight.py must judge candidate anchors by exactly
+    this measure. A tool that green-lights anchors this validator then rejects
+    is worse than no tool: on a 3840x2160 frame, two centres 900px apart score
+    20.4% by physical diagonal but 16.6% here, so the picker would have said
+    OK to anchors the recipe refuses.
+    """
+    ax, ay, aw, ah = box_a
+    bx, by, bw, bh = box_b
+    ca = (ax + aw / 2, ay + ah / 2)
+    cb = (bx + bw / 2, by + bh / 2)
+    return math.hypot(cb[0] - ca[0], cb[1] - ca[1]) / math.sqrt(2.0)
+
+
 class RecipeError(ValueError):
     """Raised when a recipe file fails validation. Message lists every problem."""
 
@@ -363,14 +384,11 @@ def parse_recipe(data: dict) -> Recipe:
             )
     # anchor separation: rotation precision needs distant anchors
     if len(anchors) >= 2:
-        (x1, y1, w1, h1), (x2, y2, w2, h2) = anchors[0].origin, anchors[1].origin
-        c1 = (x1 + w1 / 2, y1 + h1 / 2)
-        c2 = (x2 + w2 / 2, y2 + h2 / 2)
-        dist = math.hypot(c2[0] - c1[0], c2[1] - c1[1]) / math.sqrt(2.0)
+        dist = anchor_separation_frac(anchors[0].origin, anchors[1].origin)
         if dist < MIN_ANCHOR_SEPARATION_FRAC:
             errors.append(
                 f"앵커 간 이격 부족: 대각선 대비 {dist:.3f} < "
-                f"{MIN_ANCHOR_SEPARATION_FRAC} — 회전 정밀도가 무너짐 (§4.4)"
+                f"{MIN_ANCHOR_SEPARATION_FRAC} - 회전 정밀도가 무너짐 (DESIGN.md 5)"
             )
 
     gates = _dict_of(errors, "alignment.pose_gates", al.get("pose_gates", _MISSING))

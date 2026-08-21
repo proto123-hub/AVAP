@@ -12,9 +12,13 @@ import numpy as np
 import pytest
 
 from avap import preflight as P
+from avap.constants import MIN_ANCHOR_SEPARATION_FRAC
 from avap.io_utils import imread_u
+from avap.recipe import anchor_separation_frac
 from avap.preflight import estimate_pose, score_anchor, survey_anchor, survey_offset
 from avap.synth import BOSS_B, BOSS_R, generate_set, write_golden
+
+REPO = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(scope="module")
@@ -237,6 +241,72 @@ def test_well_separated_anchors_pass():
     shape = (1000, 1000, 3)
     ok, note = P.anchor_separation_note([(20, 20, 40, 40), (900, 900, 40, 40)], shape)
     assert ok
+
+
+def test_separation_is_measured_the_way_the_validator_measures_it():
+    # On a non-square frame the physical diagonal and the validator's per-axis
+    # normalization disagree. 3840x2160 with centres 900px apart scores 20.4%
+    # by physical diagonal (a pass) but 16.6% to the validator (a rejection),
+    # so measuring the wrong way would hand the operator anchors the recipe
+    # then refuses.
+    shape = (2160, 3840, 3)
+    boxes = [(1000, 1000, 40, 40), (1900, 1000, 40, 40)]
+    ok, note = P.anchor_separation_note(boxes, shape)
+    assert not ok, "물리 대각선 기준이면 통과해버리는 조합"
+
+    # And the number it reports is the validator's number, not another one.
+    norm = [(x / 3840, y / 2160, w / 3840, h / 2160) for x, y, w, h in boxes]
+    expected = anchor_separation_frac(norm[0], norm[1]) * 100
+    assert f"{expected:.1f}%" in note
+
+
+def test_the_two_checks_cannot_drift_apart():
+    # Both call the same function; this fails if a second copy of the formula
+    # is ever reintroduced in preflight.
+    rng = np.random.default_rng(7)
+    for _ in range(50):
+        shape = (int(rng.integers(400, 3000)), int(rng.integers(400, 4000)), 3)
+        h, w = shape[:2]
+        boxes = [(int(rng.integers(0, w - 50)), int(rng.integers(0, h - 50)), 40, 40)
+                 for _ in range(2)]
+        norm = [(x / w, y / h, bw / w, bh / h) for x, y, bw, bh in boxes]
+        frac = anchor_separation_frac(norm[0], norm[1])
+        ok, note = P.anchor_separation_note(boxes, shape)
+        if frac < MIN_ANCHOR_SEPARATION_FRAC:
+            assert not ok, f"validator는 거부하는데 picker가 통과시킴: {frac:.3f}"
+
+
+def test_missing_the_angular_target_is_a_failure_not_a_note():
+    # 300x300 with centres 90px apart clears the 20% floor (21.2%) but implies
+    # 0.64 deg of angle error against a 0.5 deg target. Printing "cannot meet
+    # the precision" and then exiting 0 is the documented-but-unenforced
+    # pattern; the README says exit 1, so the code has to mean it.
+    shape = (300, 300, 3)
+    ok, note = P.anchor_separation_note([(50, 100, 20, 20), (140, 100, 20, 20)], shape)
+    assert not ok
+    assert "각도 정밀도" in note
+
+
+def test_the_headless_message_names_the_actual_remedy(tmp_path, monkeypatch):
+    # requirements.txt installs opencv-python-headless, so the documented setup
+    # path guarantees this branch fires. The message has to carry the fix.
+    from avap.synth import write_golden
+    ref = write_golden(tmp_path / "golden.png")
+
+    def boom(*a, **k):
+        raise cv2.error("headless")
+    monkeypatch.setattr(cv2, "selectROIs", boom)
+    monkeypatch.setattr(cv2, "destroyAllWindows", boom)
+
+    with pytest.raises(RuntimeError) as e:
+        P.pick_anchors(ref)
+    assert "requirements-desktop.txt" in str(e.value)
+
+
+def test_desktop_requirements_supply_a_gui_opencv():
+    text = (REPO / "requirements-desktop.txt").read_text(encoding="utf-8")
+    assert "opencv-python>=" in text
+    assert text.isascii(), "clean Windows venv의 pip가 CP949로 읽다 죽는다"
 
 
 def test_exactly_two_anchors_are_required():

@@ -1,0 +1,10 @@
+# AVAP - desktop extras. ASCII only (see requirements.txt for why).
+#
+# `python -m avap.preflight pick` opens a window, which the headless OpenCV in
+# requirements.txt cannot do (its HighGUI is compiled out). Install this on the
+# PC where you pick anchor boxes.
+#
+# opencv-python and opencv-python-headless are the same import name and must
+# not both be installed: pip replaces the headless build with this one.
+-r requirements.txt
+opencv-python>=4.10,<6
