@@ -71,4 +71,9 @@ OK 40/40(UNKNOWN 0/40), cross-position은 OK 0/40(UNKNOWN 40/40)이었다. 이�
 문서에는 집계와 artifact SHA-256만 남기고 원본·경로·unit ID는 저장소에 넣지
 않는다.
 
+- Protocol/as-of: `AVAP-P1-HO-20260822` / 2026-08-22 Asia/Seoul
+- Engine commit: `7e02cdb4731a42a20e660fdf393d40a1e164fb03`
+- Private run artifact SHA-256:
+  `536D901B56678C2D60BE8CF338E3C63D1BF45ABFA5D2FAF4F6330A22B93B6170`
+
 다음: Phase 2(검출·판정 + CLI).
