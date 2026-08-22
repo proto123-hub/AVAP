@@ -46,13 +46,12 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────
   # Synthetic benchmark — 매 커밋 '무언가는 반드시 측정'.
-  # Phase 0: 생성 결정성(같은 seed 2회 = 바이트 동일)만 측정.
-  # Phase 1부터 정렬 pose 복원 오차, Phase 2부터 판정 일치율이 여기 추가된다.
+  # Phase 1: 생성 결정성 + 정렬 pose 복원 오차. Phase 2부터 판정 일치율 추가.
   # 측정값 0건이면 실패 — 항상-skip인데 녹색인 측정 job 금지 (선행 프로젝트 반면교사).
   # 합성 성적은 benchmark_kind=synthetic — 실사 성능 주장에 인용 금지.
   # ─────────────────────────────────────────────────────────────────
   synthetic-benchmark:
-    name: Synthetic benchmark (determinism)
+    name: Synthetic benchmark (pose recovery)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -65,13 +64,16 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Generate twice and compare bytes
+      - name: Generate, compare bytes, and recover pose
         run: |
           python -m avap.synth --out /tmp/synth_a --n 30 --seed 1234 --golden
           python -m avap.synth --out /tmp/synth_b --n 30 --seed 1234 --golden
           python - <<'EOF'
           import json, math, sys
           from pathlib import Path
+          from avap.alignment import Aligner, AlignStatus
+          from avap.io_utils import imread_u
+          from avap.recipe import load_recipe
           EXPECTED_N = 30  # 위 생성 명령의 --n 과 함께 바꿀 것
           a, b = Path("/tmp/synth_a"), Path("/tmp/synth_b")
           fa = {p.name: p.read_bytes() for p in sorted(a.iterdir())}
@@ -83,6 +85,7 @@ jobs:
               print(f"[FAIL] 측정 사이드카 {len(sidecars)}개 != 기대 {EXPECTED_N}개"); sys.exit(1)
           def finite_num(v):
               return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+          gt_poses = []
           for sc in sidecars:
               gt = json.loads(sc.read_text(encoding="utf-8"))
               pose = gt.get("pose", {})
@@ -92,12 +95,60 @@ jobs:
                       or gt.get("expected_verdict") not in ("PASS", "FAIL") \
                       or gt.get("benchmark_kind") != "synthetic":
                   print(f"[FAIL] 사이드카 필드 불량: {sc.name} — {gt}"); sys.exit(1)
+              gt_poses.append(tuple(pose[k] for k in ("tx", "ty", "theta_deg")))
+          columns = list(zip(*gt_poses))
+          spans = [max(values) - min(values) for values in columns]
+          if len(set(gt_poses)) != EXPECTED_N \
+                  or not all(min(values) < 0 < max(values) for values in columns) \
+                  or spans[0] < 40.0 or spans[1] < 40.0 or spans[2] < 3.0:
+              print(f"[FAIL] pose 다양성 부족: unique={len(set(gt_poses))}, spans={spans}")
+              sys.exit(1)
           if list(fa) != list(fb):
               print("[FAIL] 파일 목록 불일치"); sys.exit(1)
           diff = [n for n in fa if fa[n] != fb[n]]
           if diff:
               print(f"[FAIL] 같은 seed인데 바이트 불일치: {diff}"); sys.exit(1)
-          print(f"[OK] 사이드카 {len(sidecars)}개 검증 + {len(fa)}개 파일 결정성 확인 (seed=1234)")
+          aligner = Aligner(
+              load_recipe("recipes/sample_synth.json").alignment,
+              imread_u(a / "golden.png"),
+          )
+          errors = []
+          gate_false_positives = 0
+          for sc in sidecars:
+              gt = json.loads(sc.read_text(encoding="utf-8"))
+              result = aligner.align(imread_u(a / gt["file"]))
+              if result.status is not AlignStatus.OK or result.pose is None:
+                  gate_false_positives += 1
+                  print(f"[FAIL] valid synth가 {result.fail_code}: {gt['file']}")
+                  continue
+              pose = gt["pose"]
+              if not all(finite_num(value) for value in (
+                      result.pose.tx, result.pose.ty, result.pose.theta_deg)):
+                  print(f"[FAIL] 비유한 복원 pose: {gt['file']} — {result.pose}")
+                  sys.exit(1)
+              translation_error = math.hypot(
+                  result.pose.tx - pose["tx"], result.pose.ty - pose["ty"]
+              )
+              theta_error = abs(
+                  (result.pose.theta_deg - pose["theta_deg"] + 180) % 360 - 180
+              )
+              if not all(math.isfinite(value) for value in (
+                      translation_error, theta_error)):
+                  print(f"[FAIL] 비유한 pose 오차: {gt['file']}")
+                  sys.exit(1)
+              errors.append((translation_error, theta_error))
+          if len(errors) != EXPECTED_N:
+              print(f"[FAIL] pose 측정 {len(errors)}건 != 기대 {EXPECTED_N}건"); sys.exit(1)
+          max_translation = max(e[0] for e in errors)
+          max_theta = max(e[1] for e in errors)
+          if gate_false_positives or max_translation > 2.0 or max_theta > 0.5:
+              print(f"[FAIL] n={len(errors)}, gate 오탐={gate_false_positives}, "
+                    f"max translation={max_translation:.3f}px, "
+                    f"max theta={max_theta:.3f}deg")
+              sys.exit(1)
+          print(f"[OK] n={len(errors)}, gate 오탐=0, "
+                f"max translation={max_translation:.3f}px, "
+                f"max theta={max_theta:.3f}deg, 파일 결정성={len(fa)}")
           EOF
 
   # ─────────────────────────────────────────────────────────────────

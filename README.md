@@ -6,7 +6,7 @@
 - 정렬 실패 = **UNKNOWN** (조용한 full-frame 폴백 없음)
 - 설계 문서: [docs/DESIGN.md](docs/DESIGN.md) — 설계 법칙 L1~L7을 테스트로 강제한다
 
-## 실행 (Phase 0)
+## 실행
 
 ```bash
 pip install -r requirements.txt
@@ -45,8 +45,30 @@ python -m pip install -r requirements-desktop.txt
 앵커가 recipe 이격 하한에 못 미치거나 각도 정밀도 목표(±0.5°)를 못 맞추면
 exit 1 - 감수하고 진행하려면 `anchor`에 `--box`를 직접 지정한다.
 
+## Recipe 1.0 → 1.1
+
+Phase 1 정렬 엔진은 확정 골든 이미지에서 앵커 패치를 직접 crop/cache한다. 따라서
+1.0 recipe는 자동 변환하지 않고 명시적으로 거부한다. 기존 recipe를 올릴 때는:
+
+1. `avap_recipe`를 `"1.1"`로 변경한다.
+2. 각 `alignment.anchors[]`의 `patch`를 삭제한다.
+3. `alignment.pose_gates.anchor_dist_tol_frac`를 삭제한다. 두 앵커 거리비는
+   `scale_tol` 하나가 검사한다.
+4. `meta.recipe_version`을 올리고 기존 `meta.fingerprint`를 제거한 뒤 새 지문으로
+   저장한다.
+5. 골든 이미지의 SHA·크기와 `origin`/`search` 박스를 다시 확인한 뒤 테스트한다.
+
 ## 현재 상태
 
-Phase 0 (골격·안전망): 유니코드 안전 이미지 IO · recipe 로더+스키마 검증(죽은 파라미터 거부) · 합성 벤치마크 생성기(랜덤 pose + GT 사이드카) · CI 3 job.
+Phase 0·0.5·1 완료: 유니코드 안전 이미지 IO · recipe 1.1 로더 · Home-PC
+실사 사전 조사 · 2-앵커 NCC 정렬/서브픽셀 pose 복원 · UNKNOWN 6원인 코드 ·
+합성 pose 회귀 벤치마크 · CI 3 job.
 
-다음: Phase 0.5(실사 사전 조사 — 로딩 오차 분포·앵커 스크리닝) → Phase 1(정렬 엔진).
+Phase 1 실사 검증은 `benchmark_kind=real`인 별도 비공개 run artifact로 보존했다.
+확정 전 provisional golden과 OK 이미지로만 구성한 holdout에서 same-position은
+OK 40/40(UNKNOWN 0/40), cross-position은 OK 0/40(UNKNOWN 40/40)이었다. 이는
+**정렬의 제한된 검증**이며 OK/NG 판별이나 생산 대체 성능 주장이 아니다. 공개
+문서에는 집계와 artifact SHA-256만 남기고 원본·경로·unit ID는 저장소에 넣지
+않는다.
+
+다음: Phase 2(검출·판정 + CLI).

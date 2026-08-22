@@ -1,5 +1,5 @@
 {
-  "avap_recipe": "1.0",
+  "avap_recipe": "1.1",
   "meta": {
     "recipe_id": "SYNTH_BEAD_V1",
     "recipe_version": 1,
@@ -17,14 +17,12 @@
     "anchors": [
       {
         "id": "boss_TL",
-        "patch": "anchors/boss_tl.png",
         "origin": [0.19792, 0.20833, 0.0625, 0.08333],
         "search": [0.13542, 0.125, 0.1875, 0.25],
         "min_score": 0.7
       },
       {
         "id": "boss_BR",
-        "patch": "anchors/boss_br.png",
         "origin": [0.73958, 0.70833, 0.0625, 0.08333],
         "search": [0.67708, 0.625, 0.1875, 0.25],
         "min_score": 0.7
@@ -34,7 +32,6 @@
     "pose_gates": {
       "max_shift_frac": 0.05,
       "max_rotation_deg": 3.0,
-      "anchor_dist_tol_frac": 0.01,
       "scale_tol": 0.02
     }
   },

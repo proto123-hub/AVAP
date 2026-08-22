@@ -94,7 +94,6 @@ PARAM_SPECS: dict[str, dict[str, tuple[str, float | None, float | None, bool]]] 
 @dataclass(frozen=True)
 class Anchor:
     id: str
-    patch: str
     origin: tuple[float, float, float, float]
     search: tuple[float, float, float, float]
     min_score: float
@@ -106,7 +105,6 @@ class Alignment:
     anchors: tuple[Anchor, ...]
     max_shift_frac: float
     max_rotation_deg: float
-    anchor_dist_tol_frac: float
     scale_tol: float
 
 
@@ -163,11 +161,10 @@ ALLOWED_KEYS: dict[str, frozenset[str]] = {
     "golden": frozenset({"image_sha", "size"}),
     "alignment": frozenset({"method", "anchors", "pose_gates", "min_score_basis"}),
     "alignment.min_score_basis": frozenset({"golden_n", "p5", "margin"}),
-    # "required"는 Phase 1 정렬 엔진이 실제로 소비할 때 재도입 - 지금 넣으면
-    # 검증만 하고 모델에서 버려지는 죽은 파라미터다 (L1).
-    "alignment.anchors[]": frozenset({"id", "patch", "origin", "search", "min_score"}),
-    "alignment.pose_gates": frozenset({"max_shift_frac", "max_rotation_deg",
-                                       "anchor_dist_tol_frac", "scale_tol"}),
+    # 앵커는 정확히 2개가 모두 필수라 별도 "required"는 같은 사실을 중복하는
+    # 죽은 파라미터다 (L1).
+    "alignment.anchors[]": frozenset({"id", "origin", "search", "min_score"}),
+    "alignment.pose_gates": frozenset({"max_shift_frac", "max_rotation_deg", "scale_tol"}),
     "rois[]": frozenset({"id", "label", "rect_golden", "detect", "rules"}),
     "rois[].detect": frozenset({"space", "lower", "upper", "morph"}),
     "rois[].detect.morph": frozenset({"kernel", "size", "open_iter", "close_iter"}),
@@ -236,7 +233,8 @@ def _immutable(v: Any) -> Any:
 
 def _check_rect(errors: list[str], where: str, rect: Any) -> None:
     if (not isinstance(rect, list)) or len(rect) != 4 or not all(
-        isinstance(v, (int, float)) for v in rect
+        isinstance(v, (int, float)) and not isinstance(v, bool)
+        and math.isfinite(v) for v in rect
     ):
         errors.append(f"{where}: [x, y, w, h] 4개 숫자여야 함 - {rect!r}")
         return
@@ -358,30 +356,49 @@ def parse_recipe(data: dict) -> Recipe:
         errors.append(f"alignment.method 미지원: {method!r} (v1: template_2anchor)")
     anchors_raw = _list_of(errors, "alignment.anchors", al.get("anchors", _MISSING))
     anchors: list[Anchor] = []
-    if len(anchors_raw) < 2:
-        errors.append(f"alignment.anchors는 2개 이상이어야 함 - {len(anchors_raw)}개")
+    if len(anchors_raw) != 2:
+        errors.append(f"alignment.anchors는 정확히 2개여야 함 - {len(anchors_raw)}개")
+    anchor_ids: list[str] = []
     for i, a in enumerate(anchors_raw):
         where = f"alignment.anchors[{i}]"
         a = _dict_of(errors, where, a)
         _check_unknown_keys(errors, where, a, "alignment.anchors[]")
-        for k in ("id", "patch", "origin", "search"):
+        for k in ("id", "origin", "search"):
             if k not in a:
                 errors.append(f"{where}: '{k}' 누락")
         _check_rect(errors, f"{where}.origin", a.get("origin", []))
         _check_rect(errors, f"{where}.search", a.get("search", []))
+        anchor_id = a.get("id")
+        if not isinstance(anchor_id, str) or not anchor_id.strip():
+            errors.append(f"{where}.id: 비어 있지 않은 문자열이어야 함 - {anchor_id!r}")
+        else:
+            anchor_ids.append(anchor_id)
+        origin, search = a.get("origin"), a.get("search")
+        if (isinstance(origin, list) and len(origin) == 4
+                and isinstance(search, list) and len(search) == 4
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                        and math.isfinite(v) for v in origin + search)):
+            ox, oy, ow, oh = origin
+            sx, sy, sw, sh = search
+            if (ox < sx - 1e-9 or oy < sy - 1e-9
+                    or ox + ow > sx + sw + 1e-9
+                    or oy + oh > sy + sh + 1e-9):
+                errors.append(f"{where}.search: origin 전체를 포함해야 함")
         score = a.get("min_score", 0.7)
-        if not isinstance(score, (int, float)) or not (0.0 < score <= 1.0):
+        if (not isinstance(score, (int, float)) or isinstance(score, bool)
+                or not math.isfinite(score) or not (0.0 < score <= 1.0)):
             errors.append(f"{where}.min_score: 0~1 이어야 함 - {score!r}")
         if not errors:
             anchors.append(
                 Anchor(
                     id=str(a["id"]),
-                    patch=str(a["patch"]),
                     origin=tuple(a["origin"]),
                     search=tuple(a["search"]),
                     min_score=float(score),
                 )
             )
+    if len(anchor_ids) != len(set(anchor_ids)):
+        errors.append("alignment.anchors[].id는 서로 달라야 함")
     # anchor separation: rotation precision needs distant anchors
     if len(anchors) >= 2:
         dist = anchor_separation_frac(anchors[0].origin, anchors[1].origin)
@@ -394,11 +411,11 @@ def parse_recipe(data: dict) -> Recipe:
     gates = _dict_of(errors, "alignment.pose_gates", al.get("pose_gates", _MISSING))
     _check_unknown_keys(errors, "alignment.pose_gates", gates, "alignment.pose_gates")
     _check_frac(errors, "pose_gates.max_shift_frac", gates.get("max_shift_frac", 0.05))
-    _check_frac(errors, "pose_gates.anchor_dist_tol_frac",
-                gates.get("anchor_dist_tol_frac", 0.01))
     _check_frac(errors, "pose_gates.scale_tol", gates.get("scale_tol", 0.02))
     max_rot = gates.get("max_rotation_deg", 3.0)
-    if not isinstance(max_rot, (int, float)) or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT):
+    if (not isinstance(max_rot, (int, float)) or isinstance(max_rot, bool)
+            or not math.isfinite(max_rot)
+            or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT)):
         errors.append(
             f"pose_gates.max_rotation_deg: 0~{MAX_ROTATION_DEG_LIMIT} 이어야 함 - {max_rot!r}"
         )
@@ -485,7 +502,6 @@ def parse_recipe(data: dict) -> Recipe:
             anchors=tuple(anchors),
             max_shift_frac=float(gates.get("max_shift_frac", 0.05)),
             max_rotation_deg=float(max_rot),
-            anchor_dist_tol_frac=float(gates.get("anchor_dist_tol_frac", 0.01)),
             scale_tol=float(gates.get("scale_tol", 0.02)),
         ),
         rois=tuple(rois),

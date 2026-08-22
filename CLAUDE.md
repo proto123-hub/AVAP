@@ -33,20 +33,21 @@ python -m avap.preflight anchor --ref <골든후보> --box x,y,w,h --images <폴
 #  anchor: 앵커 후보 NCC 분포 → min_score 권고(p5−0.10). 저신뢰 측정은 분리 집계
 ```
 
-## Architecture (Phase 0 시점)
+## Architecture (Phase 1 시점)
 ```
 avap/
   constants.py   공유 상수 (L3의 단일 정의처)
   io_utils.py    유니코드 안전 이미지 IO (유일한 이미지 파일 접점)
   recipe.py      recipe 로드·스키마 검증·frozen 스냅샷·지문. PARAM_SPECS 내장 (L2)
   synth.py       합성 벤치마크: 랜덤 pose + GT 사이드카, seed 결정성 (CI가 매 커밋 측정)
+  alignment.py   2-앵커 NCC + 서브픽셀 2점 강체 pose + 4중/비유한 게이트
 recipes/         sample_synth.json — synth 골든 이미지 대응 참조 recipe (테스트 픽스처)
 tests/           pytest. source_discipline 테스트가 IO·상수 규율을 소스 레벨에서 강제
 ```
 
 ## Roadmap (docs/DESIGN.md §11)
-- Phase 0.5: 실사 사전 조사 — 로딩 오차 분포 실측·앵커 스크리닝 (파일럿 공정 2종, 사용자 확정)
-- Phase 1: 정렬 엔진 — 2-앵커 NCC + 2점 강체(스케일 1 고정, `estimateAffinePartial2D` 사용 금지 — similarity라 스케일 오차가 샘) + 서브픽셀 파라볼라 보간 + 4중 게이트. 목표 ≤2px/±0.5°
+- Phase 0.5 ✅: Home-PC 실사 사전 조사 — 로딩 오차 분포·공정별 앵커 2개 확보
+- Phase 1 ✅: 2-앵커 NCC + 2점 강체(스케일 1 고정, `estimateAffinePartial2D` 사용 금지) + 서브픽셀 파라볼라 보간 + 4중/비유한 게이트. 합성 목표와 제한된 OK 실사 holdout 통과
 - Phase 2: detect/measure/tools(blob·coverage·color_stats·shape_compare)/judge/report/batch
 - Phase 3: PyQt5 GUI (QGraphicsView, 골든 위 ROI/앵커 편집, HSV 스포이드)
 - 보류 목록(착수 전 문답 필수): M패턴, YOLO tool, ECC/ORB 폴백, Advisor 이식, EXE
