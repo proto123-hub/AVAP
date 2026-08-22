@@ -15,7 +15,11 @@ method note beat precise-looking numbers from an unvalidated pipeline.
 
 Usage (run inside the folder that holds one Position's images):
     python -m avap.preflight offset --ref golden.png --images ./ok_set --out offset.csv
+    python -m avap.preflight pick   --ref golden.png
     python -m avap.preflight anchor --ref golden.png --box 700,495,80,90 --images ./ok_set
+
+`pick` exists because `anchor` needs --box in source pixels, and reading
+those off a 4K frame by hand is where this survey stalls.
 """
 from __future__ import annotations
 
@@ -28,7 +32,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from avap.constants import MIN_ANCHOR_SEPARATION_FRAC
 from avap.io_utils import SUPPORTED_EXTS, imread_u
+from avap.recipe import anchor_separation_frac
 
 # Survey resolution: full frames are downscaled so FFTs stay fast; survey
 # precision (~1px at survey scale) is plenty for sizing search windows.
@@ -39,6 +45,15 @@ ANGLE_STEP_DEG = 0.25
 # noise (e.g. the applied material differs wildly between shots) - it is
 # excluded from the summary statistics but still reported, never silently.
 MIN_SURVEY_RESPONSE = 0.35
+
+# Anchor picking view. highgui has no zoom, so a full frame is scaled down
+# to fit an ordinary screen before boxes can be drawn on it.
+PICK_MAX_W = 1400
+PICK_MAX_H = 800
+# NCC peak localisation error assumed when reporting the angular precision
+# two picked anchors can support (DESIGN.md section 5 targets +-0.5 deg).
+NCC_PEAK_ERROR_PX = 1.0
+TARGET_THETA_DEG = 0.5
 
 
 def _gray_small(img: np.ndarray) -> tuple[np.ndarray, float]:
@@ -220,6 +235,106 @@ def survey_anchor(ref_path: Path, box: tuple[int, int, int, int],
     return summary
 
 
+def view_scale(shape: tuple, max_w: int = PICK_MAX_W, max_h: int = PICK_MAX_H) -> float:
+    """Factor that fits an image inside the picking window. Never upscales."""
+    h, w = shape[:2]
+    return min(1.0, max_w / w, max_h / h)
+
+
+def box_to_source(box_view: tuple[int, int, int, int], scale: float,
+                  shape: tuple) -> tuple[int, int, int, int]:
+    """Map a box drawn on the scaled view back to source pixels.
+
+    Both edges are mapped and then differenced, rather than scaling w/h
+    independently, so the right/bottom edge lands where the operator drew
+    it. The result is clamped inside the image: a picker that handed the
+    next command a box score_anchor() rejects would be worse than no
+    picker at all.
+    """
+    ih, iw = shape[:2]
+    x, y, w, h = box_view
+    x0 = max(0, min(int(round(x / scale)), iw - 1))
+    y0 = max(0, min(int(round(y / scale)), ih - 1))
+    x1 = max(x0 + 1, min(int(round((x + w) / scale)), iw))
+    y1 = max(y0 + 1, min(int(round((y + h) / scale)), ih))
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def anchor_separation_note(boxes: list[tuple[int, int, int, int]],
+                           shape: tuple) -> tuple[bool, str]:
+    """Judge whether two anchors sit far enough apart to carry the angle.
+
+    Two-point rigid estimation turns an NCC peak error into an angle error
+    of roughly (error / separation) radians, so anchors picked side by side
+    cannot reach the design target no matter how good each match is. The
+    separation floor is the same constant the recipe validator uses.
+    """
+    if len(boxes) != 2:
+        return False, "앵커는 정확히 2개가 필요하다 (2점 강체 추정)."
+    h, w = shape[:2]
+    # Normalize per axis first, exactly as the recipe validator does. Measuring
+    # against the physical diagonal instead would green-light anchors the
+    # validator then rejects on any non-square frame.
+    norm = [(x / w, y / h, bw / w, bh / h) for x, y, bw, bh in boxes]
+    frac = anchor_separation_frac(norm[0], norm[1])
+
+    (x0, y0, w0, h0), (x1, y1, w1, h1) = boxes
+    sep_px = math.hypot((x1 + w1 / 2) - (x0 + w0 / 2), (y1 + h1 / 2) - (y0 + h0 / 2))
+    theta_err = math.degrees(NCC_PEAK_ERROR_PX / sep_px) if sep_px > 0 else float("inf")
+    detail = (f"앵커 간격 {sep_px:.0f}px (recipe 기준 {frac * 100:.1f}%), "
+              f"NCC 1px 오차 기준 각도 정밀도 약 {theta_err:.2f}deg "
+              f"(목표 {TARGET_THETA_DEG}deg)")
+    if frac < MIN_ANCHOR_SEPARATION_FRAC:
+        return False, (f"[경고] {detail}\n"
+                       f"  recipe 하한 {MIN_ANCHOR_SEPARATION_FRAC * 100:.0f}% 미만이라 "
+                       f"검증에서 거부된다. 더 멀리 떨어진 두 곳을 다시 고를 것.")
+    if theta_err > TARGET_THETA_DEG:
+        # Passing the recipe floor while missing the design target is still a
+        # fail: reporting "cannot meet the precision" and exiting 0 would be
+        # the documented-but-unenforced pattern this project keeps removing.
+        return False, (f"[경고] {detail}\n"
+                       f"  recipe 하한은 통과했으나 각도 정밀도가 목표에 못 미친다. "
+                       f"더 멀리 떨어뜨리거나, 감수하고 진행하려면 anchor 명령에 "
+                       f"--box 를 직접 지정할 것.")
+    return True, f"[OK] {detail}"
+
+
+def pick_anchors(ref_path: Path) -> list[tuple[int, int, int, int]]:
+    """Open the reference image and let the operator drag two anchor boxes."""
+    ref = imread_u(ref_path)
+    scale = view_scale(ref.shape)
+    view = ref if scale == 1.0 else cv2.resize(
+        ref, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    print(f"기준 이미지 {ref.shape[1]}x{ref.shape[0]}"
+          + (f" (화면 표시 {scale * 100:.0f}%)" if scale < 1.0 else ""))
+    print("도포 영역 '밖'의 안정적인 랜드마크 2곳에 박스를 드래그하고 각각 ENTER, "
+          "둘 다 고른 뒤 ESC.")
+    # ASCII window title: highgui does not render Korean reliably on Windows.
+    try:
+        picked = cv2.selectROIs("AVAP - pick 2 anchors (ENTER each, ESC done)",
+                                view, showCrosshair=True)
+    except cv2.error as e:
+        raise RuntimeError(
+            "창을 열 수 없다. requirements.txt는 opencv-python-headless(GUI 없음)를 "
+            "설치한다. 기존 venv에서는 두 OpenCV 배포판을 제거한 뒤 데스크톱용만 "
+            "설치할 것:\n"
+            "    python -m pip uninstall -y opencv-python opencv-python-headless\n"
+            "    python -m pip install -r requirements-desktop.txt\n"
+            "  새 venv에서는 requirements.txt 대신 requirements-desktop.txt만 설치한다.\n"
+            "  SSH/서버처럼 화면 자체가 없으면 anchor 명령에 --box x,y,w,h 를 직접 "
+            f"지정할 것.\n  원인: {e}"
+        ) from e
+    finally:
+        # A headless build raises here too; letting that escape would bury the
+        # message above under an OpenCV traceback.
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
+    return [box_to_source(tuple(int(v) for v in b), scale, ref.shape)
+            for b in picked if b[2] > 0 and b[3] > 0]
+
+
 def _print_summary(title: str, summary: dict) -> None:
     print(f"\n=== {title} ===")
     for k, v in summary.items():
@@ -243,7 +358,30 @@ def main() -> None:
                     help="탐색창 확장(px) - offset 조사에서 나온 최대 이동보다 크게")
     p2.add_argument("--out", default=None, help="결과 CSV 경로 (utf-8-sig)")
 
+    p3 = sub.add_parser("pick", help="기준 이미지에서 앵커 박스 2개를 마우스로 지정")
+    p3.add_argument("--ref", required=True, help="기준 이미지 (골든 후보)")
+
     args = ap.parse_args()
+    if args.cmd == "pick":
+        try:
+            boxes = pick_anchors(Path(args.ref))
+        except RuntimeError as e:
+            print(f"[FAIL] {e}")
+            sys.exit(1)
+        if len(boxes) != 2:
+            print(f"[FAIL] 박스 {len(boxes)}개 지정됨 - 정확히 2개가 필요하다.")
+            sys.exit(1)
+        ok, note = anchor_separation_note(boxes, imread_u(Path(args.ref)).shape)
+        print("\n=== 앵커 박스 (원본 픽셀) ===")
+        for i, b in enumerate(boxes, 1):
+            print(f"  앵커{i}: {','.join(str(v) for v in b)}")
+        print(f"\n{note}\n")
+        print("이어서 실행할 명령:")
+        for i, b in enumerate(boxes, 1):
+            print(f"  python -m avap.preflight anchor --ref \"{args.ref}\" "
+                  f"--box {','.join(str(v) for v in b)} "
+                  f"--images <이미지 폴더> --out anchor{i}.csv")
+        sys.exit(0 if ok else 1)
     if args.cmd == "offset":
         s = survey_offset(Path(args.ref), Path(args.images),
                           Path(args.out) if args.out else None)

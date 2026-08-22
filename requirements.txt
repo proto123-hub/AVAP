@@ -1,7 +1,6 @@
-# AVAP - Phase 0 dependencies (core + tests).
+# AVAP - headless CI dependencies (core + tests).
 # ASCII only in this file: on a clean Windows venv the bundled pip may read
 # this file with the locale codec (CP949) and crash on non-ASCII comments.
-# GUI deps (opencv-python, PyQt5) arrive in Phase 3. CI installs this same line.
-numpy>=1.26,<3
+# CI uses this headless entry point. Desktop pick uses requirements-desktop.txt.
+-r requirements-common.txt
 opencv-python-headless>=4.10,<6
-pytest>=8

@@ -1,0 +1,4 @@
+# AVAP - dependencies shared by headless CI and desktop preflight.
+# ASCII only: a clean Windows venv may read this with the locale codec.
+numpy>=1.26,<3
+pytest>=8

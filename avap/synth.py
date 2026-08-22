@@ -87,7 +87,7 @@ def generate_set(
 ) -> list[Path]:
     """Write n images + one JSON sidecar each. Deterministic for a given seed."""
     if n < 1:
-        raise ValueError(f"n은 1 이상이어야 함 — {n} (측정 0건 벤치마크 금지)")
+        raise ValueError(f"n은 1 이상이어야 함 - {n} (측정 0건 벤치마크 금지)")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
