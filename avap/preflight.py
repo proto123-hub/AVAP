@@ -316,8 +316,11 @@ def pick_anchors(ref_path: Path) -> list[tuple[int, int, int, int]]:
     except cv2.error as e:
         raise RuntimeError(
             "창을 열 수 없다. requirements.txt는 opencv-python-headless(GUI 없음)를 "
-            "설치하므로 pick을 쓰려면 데스크톱용 OpenCV가 필요하다:\n"
-            "    pip install -r requirements-desktop.txt\n"
+            "설치한다. 기존 venv에서는 두 OpenCV 배포판을 제거한 뒤 데스크톱용만 "
+            "설치할 것:\n"
+            "    python -m pip uninstall -y opencv-python opencv-python-headless\n"
+            "    python -m pip install -r requirements-desktop.txt\n"
+            "  새 venv에서는 requirements.txt 대신 requirements-desktop.txt만 설치한다.\n"
             "  SSH/서버처럼 화면 자체가 없으면 anchor 명령에 --box x,y,w,h 를 직접 "
             f"지정할 것.\n  원인: {e}"
         ) from e

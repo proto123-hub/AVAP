@@ -23,8 +23,8 @@ python -m avap.synth --out output/synth --golden   # 합성 벤치마크 생성 
 python -m avap.preflight offset --ref <골든> --images <폴더> --out offset.csv
 
 # 2. 앵커 박스 2개 지정 (도포 영역 '밖'의 안정적 랜드마크)
-#    창을 띄우므로 데스크톱용 OpenCV가 필요하다:
-#      pip install -r requirements-desktop.txt
+#    창을 띄우므로 새 venv에는 requirements.txt 대신 아래 파일을 설치한다:
+#      python -m pip install -r requirements-desktop.txt
 python -m avap.preflight pick --ref <골든>
 
 # 3. 앵커별 NCC 점수 분포 - min_score의 근거
@@ -33,6 +33,13 @@ python -m avap.preflight anchor --ref <골든> --box x,y,w,h --images <폴더> -
 
 `requirements.txt`는 headless OpenCV라 창을 열 수 없다. `pick`만 데스크톱 빌드를
 요구하고, 나머지 조사와 테스트는 headless로 그대로 돌아간다.
+이미 `requirements.txt`를 설치한 venv를 재사용하려면 두 OpenCV 배포판을 먼저
+제거한 뒤 데스크톱 파일을 설치한다. 둘은 같은 `cv2` import를 공유해 공존할 수 없다.
+
+```bash
+python -m pip uninstall -y opencv-python opencv-python-headless
+python -m pip install -r requirements-desktop.txt
+```
 
 `pick`은 원본 픽셀 좌표와 이어서 붙여넣을 `anchor` 명령을 그대로 출력한다.
 앵커가 recipe 이격 하한에 못 미치거나 각도 정밀도 목표(±0.5°)를 못 맞추면

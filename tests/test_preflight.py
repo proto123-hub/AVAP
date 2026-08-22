@@ -21,6 +21,30 @@ from avap.synth import BOSS_B, BOSS_R, generate_set, write_golden
 REPO = Path(__file__).resolve().parents[1]
 
 
+def _expanded_requirement_names(path: Path, seen: set[Path] | None = None) -> set[str]:
+    """Resolve local -r includes and return normalized distribution names."""
+    path = path.resolve()
+    seen = set() if seen is None else seen
+    if path in seen:
+        return set()
+    seen.add(path)
+
+    names = set()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith(("-r ", "--requirement ")):
+            include = line.split(maxsplit=1)[1]
+            names.update(_expanded_requirement_names(path.parent / include, seen))
+            continue
+        name = line
+        for separator in ("[", "<", ">", "=", "!", "~", ";", " "):
+            name = name.split(separator, 1)[0]
+        names.add(name.lower().replace("_", "-"))
+    return names
+
+
 @pytest.fixture(scope="module")
 def synth_dir(tmp_path_factory) -> Path:
     d = tmp_path_factory.mktemp("synth")
@@ -300,13 +324,21 @@ def test_the_headless_message_names_the_actual_remedy(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError) as e:
         P.pick_anchors(ref)
-    assert "requirements-desktop.txt" in str(e.value)
+    message = str(e.value)
+    assert "pip uninstall" in message
+    assert "opencv-python-headless" in message
+    assert "requirements-desktop.txt" in message
 
 
 def test_desktop_requirements_supply_a_gui_opencv():
-    text = (REPO / "requirements-desktop.txt").read_text(encoding="utf-8")
-    assert "opencv-python>=" in text
-    assert text.isascii(), "clean Windows venv의 pip가 CP949로 읽다 죽는다"
+    desktop = (REPO / "requirements-desktop.txt").read_text(encoding="utf-8")
+    desktop_deps = _expanded_requirement_names(REPO / "requirements-desktop.txt")
+    headless_deps = _expanded_requirement_names(REPO / "requirements.txt")
+    assert "opencv-python" in desktop_deps
+    assert "opencv-python-headless" not in desktop_deps
+    assert "opencv-python-headless" in headless_deps
+    assert "opencv-python" not in headless_deps
+    assert desktop.isascii(), "clean Windows venv의 pip가 CP949로 읽다 죽는다"
 
 
 def test_exactly_two_anchors_are_required():
