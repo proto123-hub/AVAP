@@ -48,13 +48,16 @@ def test_requirements_are_ascii_only():
 
 # ── Console discipline: a message the operator must read must be printable ──
 
-def _non_docstring_literals(tree: ast.AST) -> list[tuple[int, str]]:
+def _non_docstring_literals(
+        tree: ast.AST,
+        non_console_tables: frozenset[str] = frozenset(),
+) -> list[tuple[int, str]]:
     """Every string literal except docstrings.
 
     Docstrings never reach a console, so they may hold typographic characters.
     Anything else might be raised, printed, or formatted into a message.
     """
-    docstrings = set()
+    ignored = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
                              ast.AsyncFunctionDef)):
@@ -62,10 +65,23 @@ def _non_docstring_literals(tree: ast.AST) -> list[tuple[int, str]]:
             if (body and isinstance(body[0], ast.Expr)
                     and isinstance(body[0].value, ast.Constant)
                     and isinstance(body[0].value.value, str)):
-                docstrings.add(id(body[0].value))
+                ignored.add(id(body[0].value))
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name)
+                        and target.id in non_console_tables
+                        for target in node.targets)):
+            ignored.update(id(value) for value in ast.walk(node.value)
+                           if isinstance(value, ast.Constant)
+                           and isinstance(value.value, str))
     return [(n.lineno, n.value) for n in ast.walk(tree)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            and id(n) not in docstrings]
+            and id(n) not in ignored]
+
+
+def test_non_console_table_exemption_does_not_hide_prints():
+    tree = ast.parse('VERDICT_GLYPH = {"PASS": "✓"}\nprint("✓")')
+    literals = _non_docstring_literals(tree, frozenset({"VERDICT_GLYPH"}))
+    assert literals == [(2, "✓")]
 
 
 def test_operator_messages_survive_a_cp949_console():
@@ -76,7 +92,12 @@ def test_operator_messages_survive_a_cp949_console():
     offenders = []
     for src in _sources():
         tree = ast.parse(src.read_text(encoding="utf-8"))
-        for line, text in _non_docstring_literals(tree):
+        # Qt renders these glyphs; they never touch a Windows console. Keep the
+        # exemption scoped to this one table so a print in the same module is
+        # still rejected (covered above).
+        non_console_tables = (frozenset({"VERDICT_GLYPH"})
+                              if src.name == "palette.py" else frozenset())
+        for line, text in _non_docstring_literals(tree, non_console_tables):
             bad = sorted({c for c in text
                           if ord(c) > 127 and not c.encode("cp949", "ignore")})
             if bad:
