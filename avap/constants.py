@@ -5,7 +5,7 @@ Duplicating a literal elsewhere is caught by tests/test_source_discipline.py.
 """
 
 # Recipe schema version accepted by this build.
-RECIPE_SCHEMA_VERSION = "1.0"
+RECIPE_SCHEMA_VERSION = "1.1"
 
 # Setting-change severity thresholds (fractions, shared by advisor & change log).
 NOTICE_CHANGE_FRAC = 0.15

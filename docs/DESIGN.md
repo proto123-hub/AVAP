@@ -1,6 +1,6 @@
 # AVAP 설계 문서
 
-- 상태: 승인된 설계 (Phase 0 구현 완료)
+- 상태: 승인된 설계 (Phase 1 구현·제한된 실사 검증 완료)
 - 배경: 선행 내부 프로젝트의 운영 경험(사후 분석)에서 도출된 설계 법칙을 처음부터 테스트로 강제하는 재설계
 
 ## 1. 목적과 포지션
@@ -20,7 +20,7 @@
 | L1 | 노출된 모든 recipe 파라미터는 판정에 실제 영향을 준다 | 스키마 순회 감도 프로브(verdict 플립 1회 필수). 소비자 없는 키는 로더가 거부 |
 | L2 | UI·엔진·자동 임계 추천은 단일 파라미터 명세(PARAM_SPECS)를 공유 | 슬라이더 생성·값 수집·추천 적용 전부 한 곳에서 파생 |
 | L3 | 임계 상수는 `constants.py` 한 곳에만 정의 | 리터럴 중복 grep 테스트 |
-| L4 | 정렬 불변성 — 이동+회전 변형본이 원본과 동일 verdict | 합성 세트 CI 상시 |
+| L4 | 정렬 불변성 — 이동+회전 변형본의 pose/좌표 사상, Phase 2부터 verdict까지 동일 | 합성 세트 CI 상시 |
 | L5 | 수치는 run 지문(recipe sha·이미지 sha·pose·benchmark_kind) 없이 존재 불가 | InspectionRecord 생성자의 필수 필드 (타입 수준 강제) |
 | L6 | 마스크 생성기는 시스템에 정확히 1개 | 병렬 검출 경로 grep 테스트 |
 | L7 | 단위는 전 필드 0~1 분수 | 스키마 검증 포함 |
@@ -52,13 +52,13 @@
 
 ## 5. 정렬 엔진 (핵심 기능)
 
-**2-앵커 NCC 템플릿 매칭.** 골든 이미지에서 운영자가 도포 영역 밖 안정 랜드마크 2곳에 박스를 치면, 각 앵커를 `matchTemplate(TM_CCOEFF_NORMED)` + 피라미드 + 제한 탐색창으로 찾고, 두 좌표쌍에서 **스케일 1 고정 2점 강체 닫힌형 추정**으로 (tx, ty, θ)를 산출한다 (`estimateAffinePartial2D`는 similarity 추정이라 사용 금지 — NCC 위치 오차가 스케일·회전 오차로 샌다). NCC 응답 3×3 파라볼라 보간으로 서브픽셀화. 목표 정밀도 ≤2px / ±0.5°.
+**2-앵커 NCC 템플릿 매칭.** 골든 이미지에서 운영자가 도포 영역 밖 안정 랜드마크 2곳에 박스를 치면, 확정 골든에서 두 패치를 한 번 crop/cache하고 각 앵커를 `matchTemplate(TM_CCOEFF_NORMED)` + 실측 제한 탐색창으로 찾는다. 별도 patch 파일 생명주기는 두지 않는다. 두 좌표쌍에서 **스케일 1 고정 2점 강체 닫힌형 추정**으로 (tx, ty, θ)를 산출한다 (`estimateAffinePartial2D`는 similarity 추정이라 사용 금지 — NCC 위치 오차가 스케일·회전 오차로 샌다). NCC 응답 3×3 파라볼라 보간으로 서브픽셀화. Pose는 골든 프레임 중심 회전 후의 `tx, ty`(px)와 OpenCV 이미지 좌표계의 `θ`로 정의한다. 목표 정밀도 ≤2px / ±0.5°.
 
 선정 이유: 전부 OpenCV 표준 API, NCC 점수 [0,1]이 그대로 신뢰도, 전역 밝기 변화에 강건, 운영자가 만지는 것은 앵커 박스 위치와 점수 임계 둘뿐(상용 검사기의 model region / acceptance threshold와 같은 멘탈 모델). 특징점 방식(ORB/AKAZE)은 저텍스처 금속 표면·반복 구조에서 위험해 1차 후보에서 제외.
 
-**신뢰도 = 4중 게이트의 논리곱** (하나라도 실패 → UNKNOWN): ① 앵커별 NCC ≥ min_score ② 앵커 간 거리 일관성(스케일 게이트 겸용) ③ 포즈 한계 ④ 이미지 크기 = 골든 크기. 실패는 시끄럽게 — 앵커를 UNKNOWN 무채색 + 파선 + `?` 글리프로 표시 + 원인 코드 + 이력 기록 (적색은 제품 FAIL 전용으로 예약한다. 정렬 실패는 불량이 아니라 '정보 없음'이므로 빨간 앵커는 §7의 UNKNOWN 정의와 모순된다 — `tests/test_palette.py::test_red_is_reserved_for_product_fail`가 강제). **조용한 full-frame 폴백은 코드 경로 자체가 없다.** min_score는 OK 세트 점수 분포의 p5 − 마진으로 캘리브레이션한다(백분위 철학).
+**신뢰도 = 4중 게이트의 논리곱** (하나라도 실패 → UNKNOWN): ① 이미지 크기 = 골든 크기 ② 앵커별 NCC ≥ min_score ③ 두 앵커 거리비가 1±scale_tol ④ 포즈 한계. `max_shift_frac`은 `hypot(tx/W, ty/H) / sqrt(2)`로 정의한다. NaN/inf는 별도 `NUMERIC_NONFINITE` UNKNOWN이다. 실패는 시끄럽게 — 앵커를 UNKNOWN 무채색 + 파선 + `?` 글리프로 표시 + 원인 코드 + 이력 기록 (적색은 제품 FAIL 전용으로 예약한다. 정렬 실패는 불량이 아니라 '정보 없음'이므로 빨간 앵커는 §7의 UNKNOWN 정의와 모순된다 — `tests/test_palette.py::test_red_is_reserved_for_product_fail`가 강제). **조용한 full-frame 폴백은 코드 경로 자체가 없다.** min_score는 OK calibration 세트 점수 분포의 p5 − 마진으로 정하고 별도 validation 세트로 확인한다(백분위 철학).
 
-v1 감량: ECC 정밀화·특징점 폴백·wide-search·전처리 옵션은 제외 — 운영자가 튜닝할 수 없는 노브는 죽은 파라미터의 재생산이다. 조명 강건성이 부족하면 gradient-NCC 전처리가 1순위 업그레이드 경로.
+v1 감량: 피라미드는 실측된 좁은 탐색창에서 이득 없이 계약만 늘리므로 제외한다. 실제 latency가 목표를 넘을 때 회귀 벤치마크와 함께 재검토한다. ECC 정밀화·특징점 폴백·wide-search·전처리 옵션도 제외 — 운영자가 튜닝할 수 없는 노브는 죽은 파라미터의 재생산이다. 조명 강건성이 부족하면 gradient-NCC 전처리가 1순위 업그레이드 경로.
 
 ## 6. 검출 도구 4종 (dict가 곧 레지스트리 — 플러그인 인프라 없음)
 
@@ -98,8 +98,8 @@ InspectionRecord {
 ## 9. 테스트·CI
 
 - pytest (SKIP은 CI에서 실패). CI: tests / synthetic-benchmark / no-binary-leak.
-- synthetic-benchmark: 랜덤 pose + GT 사이드카 합성 세트로 정렬→검출→판정 전 경로를 매 커밋 실측. **측정값 0건이면 실패.**
-- 합성 성적은 회귀 감지 전용(benchmark_kind=synthetic) — 성능 주장은 실사 실측(real)에만 근거. 실사 실측은 로컬 프로토콜: run 블록 JSON 커밋 + 문서 인용 시 지문 병기.
+- synthetic-benchmark: 랜덤 pose + GT 사이드카 합성 세트로 Phase 1은 정렬 pose를 매 커밋 실측하고, Phase 2부터 검출·판정까지 확장한다. **측정값 0건·비유한 오차·pose 다양성 붕괴는 실패.**
+- 합성 성적은 회귀 감지 전용(benchmark_kind=synthetic) — 성능 주장은 실사 실측(real)에만 근거. 실사 run JSON은 원본 경로·unit ID와 함께 비공개 보존하고, 공개 저장소에는 집계·artifact SHA-256·evidence boundary만 남긴다.
 - 한글 경로 픽스처 로드, 사용자 대면 출력 CP949 인코딩 검사, 좌표 왕복(<2px) — 1일차부터.
 
 ## 10. 정직한 한계
@@ -114,8 +114,8 @@ InspectionRecord {
 | Phase | 목표 | 검증 가능한 성공 기준 |
 |---|---|---|
 | 0 ✅ | 골격·안전망 — io/recipe/synth + 설계 법칙 테스트 | 한글 경로 로드 · seed 결정성 · 미소비 키 거부 · CI 녹색+SKIP 0 |
-| 0.5 | 실사 사전 조사 (파일럿 공정 2종) — 로딩 오차 분포 실측 · 앵커 후보 스크리닝 (`avap/preflight.py`) | 오차 분포 확보(탐색창·게이트 값의 근거) · 앵커 2개 확보 또는 대안 결정 |
-| 1 | 정렬 엔진 | 합성: 복원 오차 ≤2px·≤0.5°, 게이트 오탐 0 · 실사 20장/공정 성공률 ≥90%, 실패 전량 원인 코드 · L4 통과 |
+| 0.5 ✅ | 실사 사전 조사 (파일럿 공정 2종) — 로딩 오차 분포 실측 · 앵커 후보 스크리닝 (`avap/preflight.py`) | 오차 분포 확보(탐색창·게이트 값의 근거) · 공정별 앵커 2개 확보 |
+| 1 ✅ | 정렬 엔진 | 합성: 복원 오차 ≤2px·≤0.5°, 게이트 오탐 0 · provisional golden 기반 실사 20장/공정 정렬 40/40, 반대 공정 승인 0/40 · L4 pose/좌표 계약 통과(verdict는 Phase 2) |
 | 2 | 검출·판정 + CLI | L1 전 파라미터 프로브(불변 0개) · 파일럿 2종 실사 실측(FP 목표 미달 시 명시적 결정점) · run 블록 강제 |
 | 3 | GUI + 데모 | 실사 OK/NG 시연 · 좌표 왕복 <2px · 새 버전+지문 저장 · UNKNOWN 오표시 0건 · CP949 통과 |
 | 4 | 결정점 (보류 목록) | 각 항목 착수 전 기여 문답 |

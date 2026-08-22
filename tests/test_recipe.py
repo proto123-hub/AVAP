@@ -73,7 +73,45 @@ def test_missing_required_param_rejected():
 def test_single_anchor_rejected():
     d = _sample_dict()
     d["alignment"]["anchors"] = d["alignment"]["anchors"][:1]
-    with pytest.raises(RecipeError, match="2개 이상"):
+    with pytest.raises(RecipeError, match="정확히 2개"):
+        parse_recipe(d)
+
+
+def test_three_anchors_rejected():
+    d = _sample_dict()
+    d["alignment"]["anchors"].append(copy.deepcopy(d["alignment"]["anchors"][0]))
+    d["alignment"]["anchors"][2]["id"] = "third"
+    with pytest.raises(RecipeError, match="정확히 2개"):
+        parse_recipe(d)
+
+
+def test_anchor_ids_must_be_unique():
+    d = _sample_dict()
+    d["alignment"]["anchors"][1]["id"] = d["alignment"]["anchors"][0]["id"]
+    with pytest.raises(RecipeError, match="id는 서로 달라야"):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", 1, None])
+def test_anchor_id_must_be_nonempty_string(bad_id):
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["id"] = bad_id
+    with pytest.raises(RecipeError, match="비어 있지 않은 문자열"):
+        parse_recipe(d)
+
+
+def test_ids_that_would_collide_after_string_coercion_are_rejected():
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["id"] = 1
+    d["alignment"]["anchors"][1]["id"] = "1"
+    with pytest.raises(RecipeError, match="비어 있지 않은 문자열"):
+        parse_recipe(d)
+
+
+def test_anchor_search_must_contain_origin():
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["search"] = [0.0, 0.0, 0.1, 0.1]
+    with pytest.raises(RecipeError, match="origin 전체를 포함"):
         parse_recipe(d)
 
 
@@ -83,6 +121,8 @@ def test_close_anchors_rejected():
     a0 = d["alignment"]["anchors"][0]
     a1 = d["alignment"]["anchors"][1]
     a1["origin"] = [a0["origin"][0] + 0.02, a0["origin"][1], 0.0625, 0.08333]
+    a1["search"] = [a1["origin"][0] - 0.01, a1["origin"][1] - 0.01,
+                    a1["origin"][2] + 0.02, a1["origin"][3] + 0.02]
     with pytest.raises(RecipeError, match="이격 부족"):
         parse_recipe(d)
 
@@ -125,12 +165,61 @@ def test_unknown_pose_gate_key_rejected():
 
 
 def test_pose_gate_fractions_range_enforced():
-    # 외부 검증에서 실제 통과했던 값 3종 — 전부 거부돼야 한다 (L7)
-    for key, bad in (("max_shift_frac", 20), ("anchor_dist_tol_frac", -1), ("scale_tol", 25)):
+    # 외부 검증에서 실제 통과했던 범위 밖 값은 전부 거부돼야 한다 (L7)
+    for key, bad in (("max_shift_frac", 20), ("scale_tol", 25)):
         d = _sample_dict()
         d["alignment"]["pose_gates"][key] = bad
         with pytest.raises(RecipeError, match=key):
             parse_recipe(d)
+
+
+@pytest.mark.parametrize(
+    ("where", "key"),
+    [
+        ("anchor", "min_score"),
+        ("gate", "max_rotation_deg"),
+        ("origin", None),
+    ],
+)
+def test_bool_is_not_accepted_as_phase1_number(where, key):
+    d = _sample_dict()
+    if where == "anchor":
+        d["alignment"]["anchors"][0][key] = True
+    elif where == "gate":
+        d["alignment"]["pose_gates"][key] = True
+    else:
+        d["alignment"]["anchors"][0]["origin"][0] = True
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_removed_alignment_fields_are_rejected_as_dead_parameters():
+    for where, key, value in [
+        ("anchor", "patch", "anchors/a.png"),
+        ("gate", "anchor_dist_tol_frac", 0.01),
+    ]:
+        d = _sample_dict()
+        block = (d["alignment"]["anchors"][0]
+                 if where == "anchor" else d["alignment"]["pose_gates"])
+        block[key] = value
+        with pytest.raises(RecipeError, match=key):
+            parse_recipe(d)
+
+
+def test_v1_0_recipe_is_rejected_with_explicit_upgrade_deltas():
+    d = _sample_dict()
+    d["avap_recipe"] = "1.0"
+    for index, anchor in enumerate(d["alignment"]["anchors"]):
+        anchor["patch"] = f"anchors/a{index + 1}.png"
+    d["alignment"]["pose_gates"]["anchor_dist_tol_frac"] = 0.01
+
+    with pytest.raises(RecipeError) as caught:
+        parse_recipe(d)
+
+    message = str(caught.value)
+    assert "스키마 버전 불일치" in message
+    assert "patch" in message
+    assert "anchor_dist_tol_frac" in message
 
 
 def test_underscore_annotation_keys_allowed():
