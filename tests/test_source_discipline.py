@@ -26,6 +26,26 @@ def test_no_direct_cv2_image_io():
     )
 
 
+def test_single_hsv_mask_generator():
+    definitions = []
+    inrange_modules = []
+    for src in _sources():
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and node.name == "make_mask":
+                definitions.append(src.name)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "inRange"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "cv2"):
+                inrange_modules.append(src.name)
+    assert definitions == ["detection.py"], f"make_mask 단일 생성기 위반 (L6): {definitions}"
+    assert set(inrange_modules) == {"detection.py"}, (
+        f"HSV inRange는 make_mask 모듈에만 있어야 함 (L6): {inrange_modules}"
+    )
+
+
 def test_change_thresholds_defined_once():
     # 0.15 / 0.30 급변 임계가 constants.py 밖에 리터럴로 재정의되면 이중 정의 사고의 재판이다.
     offenders = []

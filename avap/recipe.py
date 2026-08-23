@@ -442,8 +442,9 @@ def parse_recipe(data: dict) -> Recipe:
             if morph.get("kernel", "ellipse") not in ("ellipse", "rect", "cross"):
                 errors.append(f"{where}.detect.morph.kernel 미지원: {morph.get('kernel')!r}")
             ksize = morph.get("size", 5)
-            if not isinstance(ksize, int) or isinstance(ksize, bool) or not (1 <= ksize <= 99):
-                errors.append(f"{where}.detect.morph.size: 1~99 정수여야 함 - {ksize!r}")
+            if (not isinstance(ksize, int) or isinstance(ksize, bool)
+                    or not (1 <= ksize <= 99) or ksize % 2 == 0):
+                errors.append(f"{where}.detect.morph.size: 1~99 홀수 정수여야 함 - {ksize!r}")
             for it in ("open_iter", "close_iter"):
                 v = morph.get(it, 1)
                 if not isinstance(v, int) or isinstance(v, bool) or not (0 <= v <= 10):

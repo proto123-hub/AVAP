@@ -230,10 +230,11 @@ def test_underscore_annotation_keys_allowed():
 
 
 def test_bad_morph_rejected():
-    d = _sample_dict()
-    d["rois"][0]["detect"]["morph"]["size"] = 0
-    with pytest.raises(RecipeError, match="morph.size"):
-        parse_recipe(d)
+    for size in (0, 2):
+        d = _sample_dict()
+        d["rois"][0]["detect"]["morph"]["size"] = size
+        with pytest.raises(RecipeError, match="morph.size"):
+            parse_recipe(d)
 
 
 # ── 2차 외부 검증 반영: 타입 가드 + required 제거 + 메타데이터 예외 타입화 ──
