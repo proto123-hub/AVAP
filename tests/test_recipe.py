@@ -237,6 +237,44 @@ def test_bad_morph_rejected():
             parse_recipe(d)
 
 
+@pytest.mark.parametrize(
+    ("lower", "upper"),
+    [
+        ([0.0, 0.0, 102 / 255], [1.0, 1.0, 102 / 255]),
+        ([89 / 179, 0.0, 0.0], [89 / 179, 1.0, 1.0]),
+        ([0.95, 0.0, 0.0], [0.05, 1.0, 1.0]),
+    ],
+    ids=["v-grid-aligned-single-bin", "h-grid-aligned-single-bin", "hue-wrap"],
+)
+def test_nonempty_quantized_hsv_bands_load(lower, upper):
+    d = _sample_dict()
+    d["rois"][0]["detect"]["lower"] = lower
+    d["rois"][0]["detect"]["upper"] = upper
+
+    parse_recipe(d)
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "empty_channel"),
+    [
+        ([0.0, 0.0, 0.5], [1.0, 1.0, 0.5], "V"),
+        ([0.5, 0.0, 0.0], [0.5, 1.0, 1.0], "H"),
+        ([0.95, 0.5, 0.0], [0.05, 0.5, 1.0], "S"),
+    ],
+    ids=["v-off-grid-zero-width", "h-off-grid-zero-width", "hue-wrap-with-empty-s"],
+)
+def test_empty_quantized_hsv_bands_are_rejected(lower, upper, empty_channel):
+    d = _sample_dict()
+    d["rois"][0]["detect"]["lower"] = lower
+    d["rois"][0]["detect"]["upper"] = upper
+
+    with pytest.raises(
+        RecipeError,
+        match=rf"양자화 후 빈 HSV 밴드 \({empty_channel}\)$",
+    ):
+        parse_recipe(d)
+
+
 # ── 2차 외부 검증 반영: 타입 가드 + required 제거 + 메타데이터 예외 타입화 ──
 
 def test_min_score_basis_non_object_rejected_not_crash():

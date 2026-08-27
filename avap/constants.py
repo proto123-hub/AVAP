@@ -7,6 +7,9 @@ Duplicating a literal elsewhere is caught by tests/test_source_discipline.py.
 # Recipe schema version accepted by this build.
 RECIPE_SCHEMA_VERSION = "1.1"
 
+# OpenCV HSV channel maxima used to quantize normalized recipe bounds.
+HSV_CHANNEL_SCALES = (179.0, 255.0, 255.0)
+
 # Setting-change severity thresholds (fractions, shared by advisor & change log).
 NOTICE_CHANGE_FRAC = 0.15
 LARGE_CHANGE_FRAC = 0.30

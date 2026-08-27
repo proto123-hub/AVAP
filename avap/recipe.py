@@ -23,6 +23,7 @@ from typing import Any
 
 from avap.constants import (
     FINGERPRINT_LEN,
+    HSV_CHANNEL_SCALES,
     MAX_ROTATION_DEG_LIMIT,
     MIN_ANCHOR_SEPARATION_FRAC,
     RECIPE_SCHEMA_VERSION,
@@ -449,12 +450,28 @@ def parse_recipe(data: dict) -> Recipe:
                 v = morph.get(it, 1)
                 if not isinstance(v, int) or isinstance(v, bool) or not (0 <= v <= 10):
                     errors.append(f"{where}.detect.morph.{it}: 0~10 정수여야 함 - {v!r}")
+        hsv_bounds = {}
         for bound in ("lower", "upper"):
             v = detect.get(bound)
             if (not isinstance(v, list)) or len(v) != 3 or not all(
                 isinstance(x, (int, float)) and 0.0 <= x <= 1.0 for x in v
             ):
                 errors.append(f"{where}.detect.{bound}: [h, s, v] 각 0~1 이어야 함 (L7) - {v!r}")
+            else:
+                hsv_bounds[bound] = v
+        if len(hsv_bounds) == 2:
+            lower, upper = hsv_bounds["lower"], hsv_bounds["upper"]
+            empty_channels = [
+                name
+                for index, (name, scale) in enumerate(zip("HSV", HSV_CHANNEL_SCALES))
+                if not (index == 0 and lower[0] > upper[0])
+                and math.ceil(lower[index] * scale) > math.floor(upper[index] * scale)
+            ]
+            if empty_channels:
+                errors.append(
+                    f"{where}.detect.lower/upper: 양자화 후 빈 HSV 밴드 "
+                    f"({'/'.join(empty_channels)})"
+                )
         rules_raw = _list_of(errors, f"{where}.rules", r.get("rules", _MISSING))
         if not rules_raw:
             errors.append(f"{where}: rules가 비어 있음")

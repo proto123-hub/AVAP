@@ -59,13 +59,61 @@ def test_make_mask_runs_hsv_then_morph_then_roi_intersection():
 
 
 def test_make_mask_supports_hue_wrap():
-    hsv = np.array([[[178, 255, 255], [2, 255, 255], [90, 255, 255]]], dtype=np.uint8)
+    hues = [170, 171, 179, 0, 8, 9]
+    hsv = np.array([[[hue, 255, 255] for hue in hues]], dtype=np.uint8)
     image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
     detect = {"lower": [0.95, 0.9, 0.9], "upper": [0.05, 1.0, 1.0]}
 
-    result = make_mask(image, np.ones((1, 3), dtype=bool), detect)
+    result = make_mask(image, np.ones((1, 6), dtype=bool), detect)
 
-    np.testing.assert_array_equal(result.foreground != 0, [[True, True, False]])
+    np.testing.assert_array_equal(
+        result.foreground != 0,
+        [[False, True, True, True, True, False]],
+    )
+
+
+@pytest.mark.parametrize(
+    ("hsv_pixel", "lower", "upper"),
+    [
+        ([0, 0, 102], [0.0, 0.0, 102 / 255], [1.0, 1.0, 102 / 255]),
+        ([89, 255, 255], [89 / 179, 0.0, 0.0], [89 / 179, 1.0, 1.0]),
+    ],
+    ids=["v-grid-aligned-single-bin", "h-grid-aligned-single-bin"],
+)
+def test_make_mask_accepts_grid_aligned_single_bin_bands(hsv_pixel, lower, upper):
+    hsv = np.array([[hsv_pixel]], dtype=np.uint8)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    result = make_mask(
+        image,
+        np.ones((1, 1), dtype=bool),
+        {"lower": lower, "upper": upper},
+    )
+
+    assert result.foreground[0, 0] == 255
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "empty_channel"),
+    [
+        ([0.0, 0.0, 0.5], [1.0, 1.0, 0.5], "V"),
+        ([0.5, 0.0, 0.0], [0.5, 1.0, 1.0], "H"),
+        ([0.95, 0.5, 0.0], [0.05, 0.5, 1.0], "S"),
+    ],
+    ids=["v-off-grid-zero-width", "h-off-grid-zero-width", "hue-wrap-with-empty-s"],
+)
+def test_make_mask_rejects_empty_quantized_hsv_bands(lower, upper, empty_channel):
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+
+    with pytest.raises(
+        DetectionInputError,
+        match=rf"empty quantized HSV band - {empty_channel}$",
+    ):
+        make_mask(
+            image,
+            np.ones((1, 1), dtype=bool),
+            {"lower": lower, "upper": upper},
+        )
 
 
 def test_even_morph_kernel_is_rejected_before_opencv_can_shift_the_mask():

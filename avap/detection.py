@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from avap.alignment import Pose, transform_points
+from avap.constants import HSV_CHANNEL_SCALES
 from avap.recipe import Rule
 
 
@@ -165,14 +166,24 @@ def make_mask(
     lower, upper = _hsv_bounds(config)
 
     hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    scale = np.array([179.0, 255.0, 255.0])
+    scale = np.asarray(HSV_CHANNEL_SCALES)
     lower_u8 = np.ceil(lower * scale).astype(np.uint8)
     upper_u8 = np.floor(upper * scale).astype(np.uint8)
+    empty_channels = lower_u8 > upper_u8
+    if lower[0] > upper[0]:
+        empty_channels[0] = False
+    if empty_channels.any():
+        names = "/".join(
+            name for name, empty in zip("HSV", empty_channels) if empty
+        )
+        raise DetectionInputError(
+            f"detect.lower/upper: empty quantized HSV band - {names}"
+        )
     if lower[0] <= upper[0]:
         foreground = cv2.inRange(hsv, lower_u8, upper_u8)
     else:
         high_upper = upper_u8.copy()
-        high_upper[0] = 179
+        high_upper[0] = int(HSV_CHANNEL_SCALES[0])
         low_lower = lower_u8.copy()
         low_lower[0] = 0
         foreground = cv2.bitwise_or(

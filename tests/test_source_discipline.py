@@ -56,6 +56,25 @@ def test_change_thresholds_defined_once():
     assert not offenders, f"급변 임계 재정의 금지 (L3): {offenders}"
 
 
+def test_hsv_channel_scales_defined_once():
+    offenders = []
+    expected = [179.0, 255.0, 255.0]
+    for src in _sources(exclude={"constants.py"}):
+        tree = ast.parse(src.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.List, ast.Tuple)):
+                continue
+            values = [
+                item.value for item in node.elts
+                if isinstance(item, ast.Constant)
+                and isinstance(item.value, (int, float))
+                and not isinstance(item.value, bool)
+            ]
+            if len(values) == len(node.elts) and values == expected:
+                offenders.append(f"{src.name}:{node.lineno}")
+    assert not offenders, f"HSV 채널 스케일 재정의 금지 (L3): {offenders}"
+
+
 def test_requirements_are_ascii_only():
     # 깨끗한 Windows venv의 번들 pip는 requirements 파일을 로케일 코덱(CP949)으로
     # 읽을 수 있어 비ASCII 주석이 있으면 설치 자체에 실패한다 (외부 검증 발견).
