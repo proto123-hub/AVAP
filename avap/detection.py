@@ -144,10 +144,14 @@ def make_mask(
     roi_mask: np.ndarray,
     detect: Mapping[str, Any] | Sequence[tuple[str, Any]],
 ) -> DetectionMask:
-    """Create the sole HSV detection mask, then intersect it with the ROI.
+    """Create the sole HSV detection mask, bounded by the ROI.
 
-    Hue bounds may wrap through zero (for example 0.95..0.05). Morphology is
-    intentionally applied before ROI intersection, matching docs/DESIGN.md.
+    Hue bounds may wrap through zero (for example 0.95..0.05).  The stage order
+    is fixed by docs/DESIGN.md section 3: HSV -> OPEN -> ROI cut -> CLOSE ->
+    ROI cut.  OPEN runs before the cut so the ROI border cannot erode a coating
+    that continues past it; CLOSE runs after the cut so material lying outside
+    the ROI cannot bridge a gap inside it.  The closing cut is defensive: a
+    convex ROI can never grow past its own edge, but a concave one can.
     """
     if (not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3
             or image_bgr.shape[2] != 3 or image_bgr.dtype != np.uint8
@@ -191,6 +195,8 @@ def make_mask(
             cv2.inRange(hsv, low_lower, upper_u8),
         )
 
+    kernel = None
+    open_iter = close_iter = 0
     morph_value = config.get("morph")
     if morph_value:
         morph = _mapping(morph_value, "detect.morph")
@@ -206,16 +212,19 @@ def make_mask(
         kernel = cv2.getStructuringElement(shapes[kernel_name], (size, size))
         open_iter = _morph_int(morph, "open_iter", 1, 0, 10)
         close_iter = _morph_int(morph, "close_iter", 1, 0, 10)
-        if open_iter:
-            foreground = cv2.morphologyEx(
-                foreground, cv2.MORPH_OPEN, kernel, iterations=open_iter
-            )
-        if close_iter:
-            foreground = cv2.morphologyEx(
-                foreground, cv2.MORPH_CLOSE, kernel, iterations=close_iter
-            )
 
-    return DetectionMask(foreground=cv2.bitwise_and(foreground, roi), roi=roi)
+    if open_iter:
+        foreground = cv2.morphologyEx(
+            foreground, cv2.MORPH_OPEN, kernel, iterations=open_iter
+        )
+    foreground = cv2.bitwise_and(foreground, roi)
+    if close_iter:
+        foreground = cv2.morphologyEx(
+            foreground, cv2.MORPH_CLOSE, kernel, iterations=close_iter
+        )
+        foreground = cv2.bitwise_and(foreground, roi)
+
+    return DetectionMask(foreground=foreground, roi=roi)
 
 
 def measure_coverage(mask: DetectionMask) -> CoverageMeasurement:
