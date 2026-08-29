@@ -37,7 +37,7 @@ def _rule(**params: float) -> Rule:
     return Rule("coverage", tuple(sorted(params.items())))
 
 
-def test_make_mask_runs_hsv_then_morph_then_roi_intersection():
+def test_make_mask_closes_an_interior_hole_and_stays_inside_the_roi():
     image = np.zeros((7, 7, 3), dtype=np.uint8)
     image[2:5, 2:5] = 255
     image[3, 3] = 0
@@ -56,6 +56,104 @@ def test_make_mask_runs_hsv_then_morph_then_roi_intersection():
     assert np.count_nonzero(result.foreground) == 6
     assert np.all(result.foreground[:, 4:] == 0)
     assert result.foreground[3, 3] == 255  # close filled the one-pixel hole
+
+
+def test_roi_cut_does_not_erode_a_coating_that_crosses_the_roi_edge():
+    # 계약의 앞쪽 절반. ROI 컷을 OPEN 앞으로 옮기면 경계에서 잘린 단면이 커널보다
+    # 좁은 조각이 되어 OPEN 에 통째로 갉힌다. OPEN 을 먼저 돌리면 도포 전체가
+    # 하나의 형상으로 평가되므로 살아남고, 그 뒤 컷이 ROI 안쪽만 남긴다.
+    roi = np.zeros((120, 120), dtype=np.uint8)
+    roi[40:71, 100:120] = 255                 # ROI 는 x >= 100
+    bright = np.zeros((120, 120), dtype=np.uint8)
+    bright[50:55, 70:103] = 255               # 도포가 경계를 가로지른다 - ROI 안 단면은 3열
+    image = np.repeat(bright[:, :, None], 3, axis=2)
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "rect", "size": 5, "open_iter": 1, "close_iter": 0},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    # 단면 3열 x 5행. 컷이 먼저 오면 5x5 커널이 3열을 지워 0px 가 된다.
+    assert np.count_nonzero(foreground) == 15, "ROI 컷이 OPEN 앞으로 갔다"
+
+
+def test_material_outside_the_roi_cannot_close_a_gap_inside_it():
+    # CLOSE가 ROI 교집합 앞에 있으면 ROI 바깥 물질이 경계를 넘어 안쪽 도포와 이어지고,
+    # 그 다리가 ROI 내부를 채워 continuity가 잡으려던 끊김을 지운다.
+    # 계약(OPEN -> ROI 컷 -> CLOSE -> ROI 컷)은 바깥 물질을 CLOSE 전에 제거한다.
+    image = np.zeros((200, 200, 3), dtype=np.uint8)
+    roi = np.zeros((200, 200), dtype=np.uint8)
+    roi[80:120, 80:120] = 255
+    image[95:105, 68:80] = 255   # ROI 바깥에만 있는 물질 (x < 80)
+    image[95:105, 84:120] = 255  # ROI 안 도포
+    # 둘 사이 간격 x=80..83 은 ROI '안쪽'이라, 다리가 놓이면 내부가 메워진다.
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "rect", "size": 9, "open_iter": 0, "close_iter": 1},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    assert not np.any(foreground[:, 80:84]), "ROI 바깥 물질이 내부 간격을 메웠다"
+    assert np.count_nonzero(foreground) == 10 * 36  # ROI 안 도포 그대로
+
+
+def test_closing_cannot_grow_past_a_roi_touching_the_frame_edge():
+    # 마지막 ROI 컷이 생산 경로에서 실제로 필요한 이유. pose 가 ROI 를 프레임 가장자리로
+    # 밀면, CLOSE 의 침식 단계가 프레임 바깥을 채워진 것으로 보는 OpenCV 경계 처리 때문에
+    # 안쪽이라면 깎였을 픽셀이 살아남아 ROI 폴리곤 밖에 놓인다. 볼록 ROI 라도 열리는 경로다.
+    # (ROI 가 프레임에 '잘리는' 경우는 make_roi_mask 가 거부하므로 존재할 수 없다.)
+    width, height = 960, 720
+    roi = make_roi_mask(
+        (0.04, 0.36, 0.08, 0.20), Pose(tx=-36.75, ty=0.0, theta_deg=-3.0), (width, height)
+    )
+    assert np.nonzero(roi)[1].min() == 0, "이 회귀는 ROI 가 프레임 좌변에 닿아야 성립한다"
+    # 백색 프레임 = HSV 임계를 프레임 전체가 통과 -> 첫 컷 뒤 전경이 곧 ROI 마스크가 된다.
+    # 반례가 입력 내용에 의존하지 않으므로 seed/threshold 없이 재현된다.
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "ellipse", "size": 5, "open_iter": 0, "close_iter": 2},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    # 마지막 컷이 없으면 이 조건에서 198px 가 ROI 밖에 남는다.
+    assert not np.any(cv2.bitwise_and(foreground, cv2.bitwise_not(roi))), (
+        "CLOSE 가 프레임 가장자리에서 ROI 밖으로 새어 나갔다 - 마지막 ROI 컷 누락"
+    )
+
+
+def test_closing_cannot_grow_past_a_concave_roi_edge():
+    # CLOSE 가 그리는 다리가 ROI 밖을 지나는 경로 중 하나. L자 ROI 의 두 팔에 조각을
+    # 하나씩 두면 다리가 오목 코너 바깥을 지난다. 생산 경로에서 실제로 열리는 다른 경로는
+    # 아래 test_closing_cannot_grow_past_a_roi_touching_the_frame_edge 가 고정한다.
+    roi = np.zeros((120, 120), dtype=np.uint8)
+    roi[30:90, 30:60] = 255          # 세로팔
+    roi[30:50, 30:95] = 255          # 가로팔 - 코너 바깥은 x>=60 & y>=50
+    bright = np.zeros((120, 120), dtype=np.uint8)
+    bright[44:50, 70:91] = 255       # 가로팔 안, 코너 위
+    bright[52:71, 52:60] = 255       # 세로팔 안, 코너 아래
+    image = np.repeat(bright[:, :, None], 3, axis=2)
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "ellipse", "size": 9, "open_iter": 0, "close_iter": 3},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    assert not np.any(cv2.bitwise_and(foreground, cv2.bitwise_not(roi))), (
+        "CLOSE 가 오목 ROI 경계를 넘었다 - 마지막 ROI 컷 누락"
+    )
 
 
 def test_make_mask_supports_hue_wrap():
