@@ -437,3 +437,52 @@ def test_aspect_ratio_min_below_one_rejected():
         parse_recipe(d)
     d["rois"][0]["rules"][0]["aspect_ratio_min"] = 1.0
     parse_recipe(d)
+
+
+@pytest.mark.parametrize("bad", ["x", None, [0.1], {"a": 1}])
+def test_wrong_typed_bound_reports_recipe_error_not_typeerror(bad):
+    # 짝 비교가 개별 검증에 실패한 raw 값을 그대로 '>' 하면 TypeError 로 탈출한다.
+    # 로더의 계약은 어떤 입력에도 RecipeError 다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][1]["min"] = bad
+    d["rois"][0]["rules"][1]["max"] = 0.3
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_out_of_range_bound_reports_range_error_not_a_pair_error():
+    # 범위를 벗어난 값은 짝 비교 대상이 아니다. 5.0 > 0.1 이라 게이트가 없으면
+    # 진짜 원인(범위) 위에 짝 오류가 하나 더 얹혀 원인을 흐린다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 5.0     # 0~1 밖
+    d["rois"][0]["rules"][0]["area_max"] = 0.1
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "범위" in message
+    assert "통과할 수 없는 구간" not in message, "범위 실패값이 짝 비교까지 흘러갔다"
+
+
+def test_non_finite_bound_rejected():
+    # json 은 NaN/Infinity 를 그대로 읽는다. 범위 검사가 걸러야 하고,
+    # 짝 비교까지 흘러가면 안 된다.
+    for bad in (float("nan"), float("inf")):
+        d = _sample_dict()
+        d["rois"][0]["rules"][0]["area_min"] = bad
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+
+
+def test_non_integer_count_bound_reports_only_the_integer_error():
+    # count_min/count_max 는 유일한 int 쌍이다. 정수 검증에 실패한 값이 짝
+    # 비교까지 흘러가면 진짜 원인 위에 짝 오류가 얹힌다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["count_min"] = 1.5
+    d["rois"][0]["rules"][0]["count_max"] = 0.5
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "정수" in message
+    assert "통과할 수 없는 구간" not in message, "정수 실패값이 짝 비교까지 흘러갔다"

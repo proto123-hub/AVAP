@@ -253,6 +253,10 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             f"{where}: 알 수 없는 tool '{tool}' (허용: {', '.join(sorted(PARAM_SPECS))})"
         )
         return
+    # Only keys that clear every check of their own are comparable to a partner
+    # below; pairing a value that is not a number would raise TypeError instead
+    # of adding to `errors`.
+    numeric: set[str] = set()
     for key, value in params.items():
         if key not in spec:
             errors.append(
@@ -270,26 +274,31 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             errors.append(f"{where}.{key}: 숫자여야 함 - {value!r}")
             continue
+        ok = True
         if kind == "int" and int(value) != value:
             errors.append(f"{where}.{key}: 정수여야 함 - {value!r}")
+            ok = False
         if lo is not None and hi is not None and not (lo <= value <= hi):
             unit = " (0~1 분수, L7)" if kind == "frac" else ""
             errors.append(f"{where}.{key}: 범위 [{lo}, {hi}] 밖{unit} - {value!r}")
+            ok = False
+        if ok:
+            numeric.add(key)
     for key, (_kind, _lo, _hi, required) in spec.items():
         if required and key not in params:
             errors.append(f"{where}: tool '{tool}'의 필수 파라미터 '{key}' 누락")
-    _check_min_max_pairs(errors, where, spec, params)
+    _check_min_max_pairs(errors, where, spec, params, numeric)
 
 
 def _min_max_pairs(spec: dict) -> tuple[tuple[str, str], ...]:
     """Pair each lower bound in a spec with its upper bound, by name.
 
-    A min is recognised by suffix - bare ``min`` or ``*_min`` - and its partner
-    is that name with ``min`` replaced by ``max``.  Suffix rather than substring
-    matching is deliberate, so a key that merely contains ``max`` (``max_dist``,
-    a distance limit with no lower partner) is never treated as one half of a
-    range.  On today's PARAM_SPECS the two rules happen to select the same keys,
-    so this is a guard on future names, not a fix for a reachable bug.
+    The scan is min-driven: a lower bound is recognised by suffix - bare ``min``
+    or ``*_min`` - and its partner is that name with ``min`` replaced by ``max``.
+    ``max_dist`` is therefore never a candidate at all, being neither; that it
+    also survives substring matching is incidental.  Suffix rather than substring
+    matching is a guard on future names - on today's PARAM_SPECS the two rules
+    select the same eight keys, so nothing observable turns on it.
 
     A min whose max is absent from the spec - ``solidity_min``, ``continuity_min``,
     ``iou_min`` - has no partner and so nothing to contradict.
@@ -305,11 +314,18 @@ def _min_max_pairs(spec: dict) -> tuple[tuple[str, str], ...]:
 
 
 def _check_min_max_pairs(
-    errors: list[str], where: str, spec: dict, params: dict
+    errors: list[str], where: str, spec: dict, params: dict, numeric: set[str]
 ) -> None:
-    """Reject a min above its paired max - a range nothing can ever satisfy."""
+    """Reject a min above its paired max - a range nothing can ever satisfy.
+
+    Only keys in ``numeric`` are compared.  A value that already failed its own
+    type or range check has an error recorded for it, and comparing it here
+    would raise TypeError out of the loader instead.
+    """
     for key, partner in _min_max_pairs(spec):
-        if key in params and partner in params and params[key] > params[partner]:
+        if key not in numeric or partner not in numeric:
+            continue
+        if params[key] > params[partner]:
             errors.append(
                 f"{where}: {key}({params[key]}) > {partner}({params[partner]}) - "
                 f"어떤 측정값도 통과할 수 없는 구간"

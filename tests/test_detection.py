@@ -559,15 +559,71 @@ def test_every_blob_filter_flips_the_verdict_on_its_own_threshold():
         removing = measured * (1.01 if is_min else 0.99)
         keeping = measured * (0.99 if is_min else 1.01)
 
+        # count_min=1 이라 제거되면 판정 자체가 뒤집힌다. count_min=0 이면
+        # 제거 여부와 무관하게 양쪽 PASS 라 아무것도 검사하지 못한다.
         removed = evaluate_blob(
-            mask, _blob_rule(count_min=0, count_max=9, **{name: removing})
+            mask, _blob_rule(count_min=1, count_max=1, **{name: removing})
         )
         kept = evaluate_blob(
-            mask, _blob_rule(count_min=0, count_max=9, **{name: keeping})
+            mask, _blob_rule(count_min=1, count_max=1, **{name: keeping})
+        )
+        boundary = evaluate_blob(
+            mask, _blob_rule(count_min=1, count_max=1, **{name: measured})
         )
 
         assert removed.kept == (), f"{name}: 임계를 넘겼는데 제거되지 않았다"
         assert [r.param for r in removed.rejected] == [name]
         assert removed.rejected[0].operator == ("<" if is_min else ">")
+        assert not removed.passed, f"{name}: 제거됐는데 판정이 그대로 PASS 다"
+        assert removed.failed_params == ("count_min",)
+
         assert kept.rejected == (), f"{name}: 통과해야 할 쪽에서 제거됐다"
         assert kept.kept == (blob,)
+        assert kept.passed
+
+        # 임계 == 실측은 통과다. <= / >= 로 바뀌면 여기서 깨진다.
+        assert boundary.rejected == (), f"{name}: 경계값이 배타적으로 처리됐다"
+        assert boundary.passed
+
+
+def test_rejection_records_the_first_violated_threshold_not_the_last():
+    # BLOB_FILTERS 순서 계약. 한 blob 이 두 임계를 동시에 위반할 때 앞선 것이
+    # 기록돼야 한다 - 하나만 위반시키면 마지막 위반 반환으로 바꿔도 통과한다.
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[5, 5:15] = 1          # 1x10 선분: area 작고 circularity 도 낮다
+    mask = _mask(foreground)
+    (blob,) = measure_blobs(mask)
+    assert blob.area < 0.01 and blob.circularity < 0.5
+
+    result = evaluate_blob(
+        mask,
+        _blob_rule(count_min=0, count_max=9, area_min=0.01, circularity_min=0.5),
+    )
+
+    (rejection,) = result.rejected
+    order = [name for name, _f, _o in BLOB_FILTERS]
+    assert order.index("area_min") < order.index("circularity_min")
+    assert rejection.param == "area_min", "표에서 앞선 임계가 기록돼야 한다"
+
+
+def test_aspect_ratio_does_not_change_with_orientation():
+    # 같은 물체를 돌린 것뿐인데 AR 이 달라지면 방향만으로 판정이 뒤집힌다.
+    # 방향 검사는 6.1 이 shape_compare 에 맡긴 몫이고 blob 은 "가늘고 김"만 잰다.
+    # 픽셀 중심만 쓰면 대각선이 13.73, 수평이 10.0 이었다.
+    horizontal = np.zeros((40, 40), dtype=np.uint8)
+    horizontal[10, 5:15] = 1
+    vertical = np.zeros((40, 40), dtype=np.uint8)
+    vertical[5:15, 10] = 1
+    diagonal = np.zeros((40, 40), dtype=np.uint8)
+    for i in range(10):
+        diagonal[5 + i, 5 + i] = 1
+
+    ars = [measure_blobs(_mask(m))[0].aspect_ratio for m in (horizontal, vertical, diagonal)]
+
+    assert all(a == pytest.approx(10.0) for a in ars), ars
+    # 같은 규칙에서 세 방향의 판정이 모두 같아야 한다.
+    rule = _blob_rule(count_min=1, count_max=1, aspect_ratio_max=11.0)
+    verdicts = [
+        evaluate_blob(_mask(m), rule).passed for m in (horizontal, vertical, diagonal)
+    ]
+    assert verdicts == [True, True, True], verdicts

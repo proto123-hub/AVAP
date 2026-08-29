@@ -80,6 +80,11 @@ class BlobResult:
 # non-count key of PARAM_SPECS["blob"] must appear here or it would load fine
 # and then never be read - a dead parameter (L1).  A test enforces both
 # directions of that correspondence.
+# Offsets from a pixel centre to the four corners of the unit square it occupies.
+_PIXEL_CORNERS = np.array(
+    [[-0.5, -0.5], [-0.5, 0.5], [0.5, -0.5], [0.5, 0.5]], dtype=np.float32
+)
+
 BLOB_FILTERS: tuple[tuple[str, str, str], ...] = (
     ("area_min", "area", "<"),
     ("area_max", "area", ">"),
@@ -359,10 +364,14 @@ def measure_blobs(mask: DetectionMask) -> tuple[BlobMeasurement, ...]:
       undercounts the hull: a filled 3x3 square would score 9/4 = 2.25.  Pixel
       counting keeps numerator and denominator in the same unit, so the ratio
       stays within 1.0 and a hollow coating still falls below it.
-    * ``minAreaRect`` reports a zero side for thin or tiny components (a 1x10
-      line measures (0, 9)), which would make the ratio infinite or undefined.
-      Sides are read as pixel extents - side + 1 - so a 20x5 rectangle measures
-      exactly 4.0 and a single pixel 1.0, and the ratio stays >= 1 and finite.
+    * ``minAreaRect`` over contour points measures pixel *centres*, so it reports
+      a zero side for a one-pixel-wide component (a 1x10 line measures (0, 9))
+      and - the real defect - a direction-dependent one: a 10px diagonal run
+      would score 13.73 against a 10px horizontal run's 10.0, flipping a verdict
+      on orientation alone, which section 6.1 gives to ``shape_compare``, not
+      here.  Feeding the four corners of each pixel instead measures the area
+      the component actually occupies: both runs score 10.0, a 20x5 rectangle
+      exactly 4.0, a single pixel 1.0.
     """
     roi, foreground = _validated_pair(mask)
     roi_pixels = int(np.count_nonzero(roi))
@@ -401,8 +410,19 @@ def measure_blobs(mask: DetectionMask) -> tuple[BlobMeasurement, ...]:
         hull_pixels = int(np.count_nonzero(hull_mask))
         solidity = pixels / hull_pixels if hull_pixels else 1.0
 
-        (_centre, (rect_w, rect_h), _angle) = cv2.minAreaRect(contour)
-        long_side, short_side = max(rect_w, rect_h) + 1.0, min(rect_w, rect_h) + 1.0
+        # minAreaRect over the pixel *corners*, not the contour points.  A
+        # contour point is a pixel centre, so the rect it spans is a side short
+        # on every axis and, worse, short by a direction-dependent amount: a
+        # 10px horizontal run and a 10px diagonal run are the same object turned,
+        # yet centres alone put them at different ratios.  Modelling each pixel
+        # as the unit square it is restores that symmetry, and guarantees both
+        # sides >= 1 (the rect must contain at least one whole unit square), so
+        # the ratio is finite without a special case.
+        corners = np.concatenate(
+            [contour.reshape(-1, 2) + offset for offset in _PIXEL_CORNERS]
+        ).astype(np.float32)
+        (_centre, (rect_w, rect_h), _angle) = cv2.minAreaRect(corners)
+        long_side, short_side = max(rect_w, rect_h), min(rect_w, rect_h)
 
         blobs.append(
             BlobMeasurement(
