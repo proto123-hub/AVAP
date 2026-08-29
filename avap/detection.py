@@ -46,6 +46,51 @@ class CoverageResult:
     failed_params: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class BlobMeasurement:
+    """One 8-connected component, measured against the ROI that contains it."""
+
+    pixels: int
+    area: float
+    circularity: float
+    solidity: float
+    aspect_ratio: float
+
+
+@dataclass(frozen=True)
+class BlobRejection:
+    """The single threshold that removed one measured blob before counting."""
+
+    blob: BlobMeasurement
+    param: str
+    measured: float
+    threshold: float
+    operator: str
+
+
+@dataclass(frozen=True)
+class BlobResult:
+    kept: tuple[BlobMeasurement, ...]
+    rejected: tuple[BlobRejection, ...]
+    passed: bool
+    failed_params: tuple[str, ...]
+
+
+# Shape thresholds that remove a blob, in the order they are tested.  Every
+# non-count key of PARAM_SPECS["blob"] must appear here or it would load fine
+# and then never be read - a dead parameter (L1).  A test enforces both
+# directions of that correspondence.
+BLOB_FILTERS: tuple[tuple[str, str, str], ...] = (
+    ("area_min", "area", "<"),
+    ("area_max", "area", ">"),
+    ("circularity_min", "circularity", "<"),
+    ("circularity_max", "circularity", ">"),
+    ("solidity_min", "solidity", "<"),
+    ("aspect_ratio_min", "aspect_ratio", "<"),
+    ("aspect_ratio_max", "aspect_ratio", ">"),
+)
+
+
 def _binary_mask(value: np.ndarray, name: str, shape: tuple[int, int]) -> np.ndarray:
     if not isinstance(value, np.ndarray) or value.ndim != 2 or value.shape != shape:
         actual = getattr(value, "shape", None)
@@ -228,8 +273,13 @@ def make_mask(
     return DetectionMask(foreground=foreground, roi=roi)
 
 
-def measure_coverage(mask: DetectionMask) -> CoverageMeasurement:
-    """Measure foreground/ROI and largest-component/foreground fractions."""
+def _validated_pair(mask: DetectionMask) -> tuple[np.ndarray, np.ndarray]:
+    """Return (roi, foreground) as 0/255 masks, or raise on a broken pair.
+
+    Shared by every measurement tool so they cannot drift apart on what counts
+    as a usable mask - the ROI denominator and the foreground-inside-ROI
+    invariant have to mean the same thing to all of them.
+    """
     if not isinstance(mask, DetectionMask):
         raise DetectionInputError("mask: DetectionMask required")
     shape = getattr(mask.roi, "shape", None)
@@ -241,6 +291,12 @@ def measure_coverage(mask: DetectionMask) -> CoverageMeasurement:
         raise DetectionInputError("mask.roi: at least one ROI pixel required")
     if np.any((foreground != 0) & (roi == 0)):
         raise DetectionInputError("mask.foreground: pixels outside ROI are forbidden")
+    return roi, foreground
+
+
+def measure_coverage(mask: DetectionMask) -> CoverageMeasurement:
+    """Measure foreground/ROI and largest-component/foreground fractions."""
+    roi, foreground = _validated_pair(mask)
 
     roi_pixels = int(np.count_nonzero(roi))
     foreground_pixels = int(np.count_nonzero(foreground))
@@ -279,3 +335,129 @@ def evaluate_coverage(mask: DetectionMask, rule: Rule) -> CoverageResult:
     ):
         failed.append("continuity_min")
     return CoverageResult(measurement, not failed, tuple(failed))
+
+
+def measure_blobs(mask: DetectionMask) -> tuple[BlobMeasurement, ...]:
+    """Measure every 8-connected component of the foreground inside the ROI.
+
+    Per docs/DESIGN.md section 6.1 a blob *is* the connected component; contours
+    only supply shape descriptors for a component already fixed.  An empty
+    foreground yields an empty tuple - zero components is a real measurement of
+    ``count=0``, not a missing one, which is why this differs from coverage's
+    ``continuity=None``.
+
+    Three degenerate cases the section does not spell out are settled here and
+    fixed by tests:
+
+    * ``circularity`` exceeds 1.0 for small components (a 3x3 square measures
+      1.767) and is undefined for a single pixel, whose outer perimeter is 0.
+      Both resolve to 1.0 - the clamp for the first, an explicit branch for the
+      second, since ``arcLength`` returns a plain float and dividing by it
+      raises rather than yielding an infinity the clamp could absorb.
+    * ``solidity`` uses the *pixel count* of the filled convex hull, not
+      ``cv2.contourArea``.  The contour runs through pixel centres, so its area
+      undercounts the hull: a filled 3x3 square would score 9/4 = 2.25.  Pixel
+      counting keeps numerator and denominator in the same unit, so the ratio
+      stays within 1.0 and a hollow coating still falls below it.
+    * ``minAreaRect`` reports a zero side for thin or tiny components (a 1x10
+      line measures (0, 9)), which would make the ratio infinite or undefined.
+      Sides are read as pixel extents - side + 1 - so a 20x5 rectangle measures
+      exactly 4.0 and a single pixel 1.0, and the ratio stays >= 1 and finite.
+    """
+    roi, foreground = _validated_pair(mask)
+    roi_pixels = int(np.count_nonzero(roi))
+    # An empty foreground needs no special case: labelling reports background
+    # only, so the loop below runs zero times and yields ().
+    total, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        foreground, connectivity=8
+    )
+    blobs = []
+    for label in range(1, total):
+        left = int(stats[label, cv2.CC_STAT_LEFT])
+        top = int(stats[label, cv2.CC_STAT_TOP])
+        width = int(stats[label, cv2.CC_STAT_WIDTH])
+        height = int(stats[label, cv2.CC_STAT_HEIGHT])
+        pixels = int(stats[label, cv2.CC_STAT_AREA])
+        # Measurements are translation invariant, so crop to the component's own
+        # bounding box instead of materialising a full-frame mask per component.
+        window = labels[top : top + height, left : left + width]
+        component = np.where(window == label, 255, 0).astype(np.uint8)
+        # RETR_EXTERNAL on an already 8-connected component yields exactly one
+        # contour, and it is the outer one - which is what keeps holes out of the
+        # perimeter.  Unpacking rather than picking the largest keeps that fact
+        # load-bearing instead of papering over a wrong retrieval mode.
+        (contour,), _hierarchy = cv2.findContours(
+            component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        perimeter = cv2.arcLength(contour, True)
+        circularity = (
+            min(4.0 * np.pi * pixels / perimeter**2, 1.0) if perimeter > 0 else 1.0
+        )
+
+        hull = cv2.convexHull(contour)
+        hull_mask = np.zeros_like(component)
+        cv2.drawContours(hull_mask, [hull], -1, 255, -1)
+        hull_pixels = int(np.count_nonzero(hull_mask))
+        solidity = pixels / hull_pixels if hull_pixels else 1.0
+
+        (_centre, (rect_w, rect_h), _angle) = cv2.minAreaRect(contour)
+        long_side, short_side = max(rect_w, rect_h) + 1.0, min(rect_w, rect_h) + 1.0
+
+        blobs.append(
+            BlobMeasurement(
+                pixels=pixels,
+                area=pixels / roi_pixels,
+                circularity=float(circularity),
+                solidity=float(solidity),
+                aspect_ratio=long_side / short_side,
+            )
+        )
+    return tuple(blobs)
+
+
+def _first_rejection(
+    blob: BlobMeasurement, params: Mapping[str, Any]
+) -> BlobRejection | None:
+    """Find the first threshold that removes this blob, in BLOB_FILTERS order."""
+    for name, field, operator in BLOB_FILTERS:
+        if name not in params:
+            continue
+        measured = float(getattr(blob, field))
+        threshold = float(params[name])
+        removed = measured < threshold if operator == "<" else measured > threshold
+        if removed:
+            return BlobRejection(blob, name, measured, threshold, operator)
+    return None
+
+
+def evaluate_blob(mask: DetectionMask, rule: Rule) -> BlobResult:
+    """Measure, remove blobs failing a shape threshold, then judge the survivors.
+
+    The order is fixed by docs/DESIGN.md section 6.1: shape parameters perform a
+    real removal, and only what survives reaches ``count_min``/``count_max``.
+    Each removed blob carries the single threshold that removed it - the first
+    in ``BLOB_FILTERS`` order - so ``len(rejected)`` is the number of blobs
+    removed, not the number of failed comparisons.
+    """
+    if not isinstance(rule, Rule) or rule.tool != "blob":
+        actual = getattr(rule, "tool", None)
+        raise DetectionInputError(f"rule: blob Rule required - {actual!r}")
+    params = dict(rule.params)
+
+    kept: list[BlobMeasurement] = []
+    rejected: list[BlobRejection] = []
+    for blob in measure_blobs(mask):
+        rejection = _first_rejection(blob, params)
+        if rejection is None:
+            kept.append(blob)
+        else:
+            rejected.append(rejection)
+
+    count = len(kept)
+    failed: list[str] = []
+    if count < int(params["count_min"]):
+        failed.append("count_min")
+    if count > int(params["count_max"]):
+        failed.append("count_max")
+    return BlobResult(tuple(kept), tuple(rejected), not failed, tuple(failed))

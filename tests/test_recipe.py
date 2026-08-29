@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from avap.recipe import RecipeError, compute_fingerprint, load_recipe, parse_recipe
+from avap.recipe import (
+    PARAM_SPECS,
+    RecipeError,
+    _min_max_pairs,
+    compute_fingerprint,
+    load_recipe,
+    parse_recipe,
+)
 
 SAMPLE = Path(__file__).resolve().parents[1] / "recipes" / "sample_synth.json"
 
@@ -372,3 +379,61 @@ def test_absent_optional_blocks_still_use_defaults():
     d["rois"][0]["detect"].pop("morph", None)
     r = parse_recipe(d)
     assert r.alignment.scale_tol == 0.02  # 기본값
+
+
+def test_min_above_max_rejected():
+    # 통과 가능한 측정값이 존재하지 않는 구간은 로드 단계에서 막는다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 0.9
+    d["rois"][0]["rules"][0]["area_max"] = 0.1
+    with pytest.raises(RecipeError, match="area_min"):
+        parse_recipe(d)
+
+
+def test_bare_min_max_pair_is_checked_too():
+    # coverage 는 접두사 없는 min/max 를 쓴다 — 접미사 규칙이 이쪽도 잡아야 한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][1]["min"] = 0.8
+    d["rois"][0]["rules"][1]["max"] = 0.3
+    with pytest.raises(RecipeError, match="min"):
+        parse_recipe(d)
+
+
+def test_min_equal_to_max_is_allowed():
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 0.5
+    d["rois"][0]["rules"][0]["area_max"] = 0.5
+    parse_recipe(d)  # 한 점만 통과하는 구간은 모순이 아니다
+
+
+def test_min_max_sweep_pairs_exactly_the_bounds_that_have_partners():
+    # 짝짓기 결과를 고정한다. 스펙에 새 min/max 쌍이 생기면 여기서 먼저 깨지고,
+    # 짝 도출이 틀어져 없던 쌍을 만들어내도 깨진다.
+    # max_dist(짝 없는 거리 한계)와 solidity_min/continuity_min/iou_min 이
+    # 쌍으로 잡히지 않는다는 것이 이 테스트가 지키는 내용이다.
+    assert _min_max_pairs(PARAM_SPECS["blob"]) == (
+        ("count_min", "count_max"),
+        ("area_min", "area_max"),
+        ("circularity_min", "circularity_max"),
+        ("aspect_ratio_min", "aspect_ratio_max"),
+    )
+    assert _min_max_pairs(PARAM_SPECS["coverage"]) == (("min", "max"),)
+    assert _min_max_pairs(PARAM_SPECS["color_stats"]) == ()
+    assert _min_max_pairs(PARAM_SPECS["shape_compare"]) == ()
+
+
+def test_min_without_a_max_partner_loads():
+    # solidity_min / continuity_min 은 스펙에 짝이 없다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["solidity_min"] = 0.99
+    parse_recipe(d)
+
+
+def test_aspect_ratio_min_below_one_rejected():
+    # DESIGN 6.1: 측정값은 항상 >=1 이므로 0~1 구간은 도달 불가능한 죽은 구간이다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["aspect_ratio_min"] = 0.5
+    with pytest.raises(RecipeError, match="aspect_ratio_min"):
+        parse_recipe(d)
+    d["rois"][0]["rules"][0]["aspect_ratio_min"] = 1.0
+    parse_recipe(d)

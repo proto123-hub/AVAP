@@ -70,7 +70,7 @@ PARAM_SPECS: dict[str, dict[str, tuple[str, float | None, float | None, bool]]] 
         "circularity_min": ("frac", 0.0, 1.0, False),
         "circularity_max": ("frac", 0.0, 1.0, False),
         "solidity_min": ("frac", 0.0, 1.0, False),
-        "aspect_ratio_min": ("float", 0.0, 100.0, False),
+        "aspect_ratio_min": ("float", 1.0, 100.0, False),
         "aspect_ratio_max": ("float", 0.0, 100.0, False),
     },
     "coverage": {
@@ -278,6 +278,42 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
     for key, (_kind, _lo, _hi, required) in spec.items():
         if required and key not in params:
             errors.append(f"{where}: tool '{tool}'의 필수 파라미터 '{key}' 누락")
+    _check_min_max_pairs(errors, where, spec, params)
+
+
+def _min_max_pairs(spec: dict) -> tuple[tuple[str, str], ...]:
+    """Pair each lower bound in a spec with its upper bound, by name.
+
+    A min is recognised by suffix - bare ``min`` or ``*_min`` - and its partner
+    is that name with ``min`` replaced by ``max``.  Suffix rather than substring
+    matching is deliberate, so a key that merely contains ``max`` (``max_dist``,
+    a distance limit with no lower partner) is never treated as one half of a
+    range.  On today's PARAM_SPECS the two rules happen to select the same keys,
+    so this is a guard on future names, not a fix for a reachable bug.
+
+    A min whose max is absent from the spec - ``solidity_min``, ``continuity_min``,
+    ``iou_min`` - has no partner and so nothing to contradict.
+    """
+    pairs = []
+    for key in spec:
+        if key != "min" and not key.endswith("_min"):
+            continue
+        partner = key[: -len("min")] + "max"
+        if partner in spec:
+            pairs.append((key, partner))
+    return tuple(pairs)
+
+
+def _check_min_max_pairs(
+    errors: list[str], where: str, spec: dict, params: dict
+) -> None:
+    """Reject a min above its paired max - a range nothing can ever satisfy."""
+    for key, partner in _min_max_pairs(spec):
+        if key in params and partner in params and params[key] > params[partner]:
+            errors.append(
+                f"{where}: {key}({params[key]}) > {partner}({params[partner]}) - "
+                f"어떤 측정값도 통과할 수 없는 구간"
+            )
 
 
 def compute_fingerprint(data: dict) -> str:
