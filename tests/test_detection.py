@@ -103,10 +103,37 @@ def test_material_outside_the_roi_cannot_close_a_gap_inside_it():
     assert np.count_nonzero(foreground) == 10 * 36  # ROI 안 도포 그대로
 
 
+def test_closing_cannot_grow_past_a_roi_touching_the_frame_edge():
+    # 마지막 ROI 컷이 생산 경로에서 실제로 필요한 이유. pose 가 ROI 를 프레임 가장자리로
+    # 밀면, CLOSE 의 침식 단계가 프레임 바깥을 채워진 것으로 보는 OpenCV 경계 처리 때문에
+    # 안쪽이라면 깎였을 픽셀이 살아남아 ROI 폴리곤 밖에 놓인다. 볼록 ROI 라도 열리는 경로다.
+    # (ROI 가 프레임에 '잘리는' 경우는 make_roi_mask 가 거부하므로 존재할 수 없다.)
+    width, height = 960, 720
+    roi = make_roi_mask(
+        (0.04, 0.36, 0.08, 0.20), Pose(tx=-36.75, ty=0.0, theta_deg=-3.0), (width, height)
+    )
+    assert np.nonzero(roi)[1].min() == 0, "이 회귀는 ROI 가 프레임 좌변에 닿아야 성립한다"
+    speckle = (np.random.default_rng(0).random((height, width)) > 0.5).astype(np.uint8) * 255
+    image = np.repeat(speckle[:, :, None], 3, axis=2)
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "ellipse", "size": 5, "open_iter": 0, "close_iter": 2},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    # 마지막 컷이 없으면 이 조건에서 198px 가 ROI 밖에 남는다.
+    assert not np.any(cv2.bitwise_and(foreground, cv2.bitwise_not(roi))), (
+        "CLOSE 가 프레임 가장자리에서 ROI 밖으로 새어 나갔다 - 마지막 ROI 컷 누락"
+    )
+
+
 def test_closing_cannot_grow_past_a_concave_roi_edge():
     # CLOSE 가 그리는 다리가 ROI 밖을 지나는 경로 중 하나. L자 ROI 의 두 팔에 조각을
-    # 하나씩 두면 다리가 오목 코너 바깥을 지난다. (다른 경로: ROI 가 영상 프레임에 잘리면
-    # 볼록 ROI 에서도 CLOSE 침식 단계의 경계 처리 때문에 프레임 가장자리로 새어 나간다.)
+    # 하나씩 두면 다리가 오목 코너 바깥을 지난다. 생산 경로에서 실제로 열리는 다른 경로는
+    # 아래 test_closing_cannot_grow_past_a_roi_touching_the_frame_edge 가 고정한다.
     roi = np.zeros((120, 120), dtype=np.uint8)
     roi[30:90, 30:60] = 255          # 세로팔
     roi[30:50, 30:95] = 255          # 가로팔 - 코너 바깥은 x>=60 & y>=50
