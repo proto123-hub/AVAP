@@ -113,8 +113,9 @@ def test_closing_cannot_grow_past_a_roi_touching_the_frame_edge():
         (0.04, 0.36, 0.08, 0.20), Pose(tx=-36.75, ty=0.0, theta_deg=-3.0), (width, height)
     )
     assert np.nonzero(roi)[1].min() == 0, "이 회귀는 ROI 가 프레임 좌변에 닿아야 성립한다"
-    speckle = (np.random.default_rng(0).random((height, width)) > 0.5).astype(np.uint8) * 255
-    image = np.repeat(speckle[:, :, None], 3, axis=2)
+    # 백색 프레임 = HSV 임계를 프레임 전체가 통과 -> 첫 컷 뒤 전경이 곧 ROI 마스크가 된다.
+    # 반례가 입력 내용에 의존하지 않으므로 seed/threshold 없이 재현된다.
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
     detect = {
         "space": "hsv",
         "lower": [0.0, 0.0, 0.5],

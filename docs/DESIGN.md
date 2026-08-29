@@ -71,7 +71,7 @@ rect_golden (0.04, 0.36, 0.08, 0.20)
 Pose(tx=-36.75, ty=0, theta=-3deg)
   -> 사상된 폴리곤 [[7,236],[83,240],[76,383],[0,379]]  (프레임 좌변 x=0 에 접촉)
 detect.morph: ellipse 5x5, open_iter=0, close_iter=2
-전경: numpy default_rng(0) speckle > 0.5
+전경: np.full((720, 960, 3), 255, dtype=np.uint8)  (첫 컷 뒤 전경 == ROI 마스크)
 ```
 
 원인은 OpenCV의 경계 처리다 — CLOSE의 침식 단계가 프레임 바깥을 채워진 것으로 보므로, 프레임
