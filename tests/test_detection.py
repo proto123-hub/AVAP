@@ -58,6 +58,28 @@ def test_make_mask_closes_an_interior_hole_and_stays_inside_the_roi():
     assert result.foreground[3, 3] == 255  # close filled the one-pixel hole
 
 
+def test_roi_cut_does_not_erode_a_coating_that_crosses_the_roi_edge():
+    # 계약의 앞쪽 절반. ROI 컷을 OPEN 앞으로 옮기면 경계에서 잘린 단면이 커널보다
+    # 좁은 조각이 되어 OPEN 에 통째로 갉힌다. OPEN 을 먼저 돌리면 도포 전체가
+    # 하나의 형상으로 평가되므로 살아남고, 그 뒤 컷이 ROI 안쪽만 남긴다.
+    roi = np.zeros((120, 120), dtype=np.uint8)
+    roi[40:71, 100:120] = 255                 # ROI 는 x >= 100
+    bright = np.zeros((120, 120), dtype=np.uint8)
+    bright[50:55, 70:103] = 255               # 도포가 경계를 가로지른다 - ROI 안 단면은 3열
+    image = np.repeat(bright[:, :, None], 3, axis=2)
+    detect = {
+        "space": "hsv",
+        "lower": [0.0, 0.0, 0.5],
+        "upper": [1.0, 0.2, 1.0],
+        "morph": {"kernel": "rect", "size": 5, "open_iter": 1, "close_iter": 0},
+    }
+
+    foreground = make_mask(image, roi, detect).foreground
+
+    # 단면 3열 x 5행. 컷이 먼저 오면 5x5 커널이 3열을 지워 0px 가 된다.
+    assert np.count_nonzero(foreground) == 15, "ROI 컷이 OPEN 앞으로 갔다"
+
+
 def test_material_outside_the_roi_cannot_close_a_gap_inside_it():
     # CLOSE가 ROI 교집합 앞에 있으면 ROI 바깥 물질이 경계를 넘어 안쪽 도포와 이어지고,
     # 그 다리가 ROI 내부를 채워 continuity가 잡으려던 끊김을 지운다.
@@ -82,9 +104,9 @@ def test_material_outside_the_roi_cannot_close_a_gap_inside_it():
 
 
 def test_closing_cannot_grow_past_a_concave_roi_edge():
-    # 마지막 ROI 컷이 막는 유일한 경로. 볼록 ROI 는 자기 경계 밖으로 자랄 수 없어
-    # (무작위 400회 유출 0건) 이 성질이 무발동이므로, 실제로 물게 하려면 오목 ROI 가 필요하다.
-    # L자 ROI 의 두 팔에 조각을 하나씩 두면 CLOSE 가 잇는 다리가 오목 코너 바깥을 지난다.
+    # CLOSE 가 그리는 다리가 ROI 밖을 지나는 경로 중 하나. L자 ROI 의 두 팔에 조각을
+    # 하나씩 두면 다리가 오목 코너 바깥을 지난다. (다른 경로: ROI 가 영상 프레임에 잘리면
+    # 볼록 ROI 에서도 CLOSE 침식 단계의 경계 처리 때문에 프레임 가장자리로 새어 나간다.)
     roi = np.zeros((120, 120), dtype=np.uint8)
     roi[30:90, 30:60] = 255          # 세로팔
     roi[30:50, 30:95] = 255          # 가로팔 - 코너 바깥은 x>=60 & y>=50

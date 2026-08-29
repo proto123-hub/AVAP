@@ -150,8 +150,9 @@ def make_mask(
     is fixed by docs/DESIGN.md section 3: HSV -> OPEN -> ROI cut -> CLOSE ->
     ROI cut.  OPEN runs before the cut so the ROI border cannot erode a coating
     that continues past it; CLOSE runs after the cut so material lying outside
-    the ROI cannot bridge a gap inside it.  The closing cut is defensive: a
-    convex ROI can never grow past its own edge, but a concave one can.
+    the ROI cannot bridge a gap inside it.  The second cut restores the
+    foreground-inside-ROI invariant that CLOSE can break, because the bridge it
+    draws between two fragments may run outside the ROI.
     """
     if (not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3
             or image_bgr.shape[2] != 3 or image_bgr.dtype != np.uint8
