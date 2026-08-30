@@ -532,3 +532,60 @@ def test_non_integer_count_bound_reports_only_the_integer_error():
     message = str(excinfo.value)
     assert "정수" in message
     assert "통과할 수 없는 구간" not in message, "정수 실패값이 짝 비교까지 흘러갔다"
+
+
+def _numeric_paths(node, prefix=()):
+    """Every path in the sample recipe whose leaf is a number."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _numeric_paths(v, prefix + (k,))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _numeric_paths(v, prefix + (i,))
+    elif isinstance(node, (int, float)) and not isinstance(node, bool):
+        yield prefix
+
+
+def _set_path(data, path, value):
+    node = data
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+
+
+OVERSIZED = 10 ** 4300   # 4301자리 - CPython 기본 문자열 변환 한계(4300)를 넘는다
+
+
+def test_oversized_integer_at_any_numeric_field_reports_recipe_error():
+    # 거대 정수는 오류 메시지의 repr 과 fingerprint 의 json.dumps 양쪽에서
+    # ValueError 로 터진다. 메시지 자리를 하나씩 고치는 대신 진입점에서 막았고,
+    # 그 총체성을 샘플 레시피의 모든 숫자 위치에 주입해 확인한다.
+    paths = list(_numeric_paths(_sample_dict()))
+    assert len(paths) > 20, f"주입 지점이 너무 적다: {len(paths)}"
+
+    for path in paths:
+        d = _sample_dict()
+        _set_path(d, path, OVERSIZED)
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+
+
+def test_oversized_integer_literal_in_a_file_reports_recipe_error(tmp_path):
+    # json.loads 자체가 4301자리 리터럴을 ValueError 로 거부하므로,
+    # load_recipe 가 그것을 RecipeError 로 감싸야 파일 경로 계약이 닫힌다.
+    path = tmp_path / "oversized_literal.json"
+    path.write_text(
+        json.dumps(_sample_dict()).replace('"count_min": 1', '"count_min": 1' + "0" * 4300),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+def test_integer_at_the_stringify_limit_still_validates_normally():
+    # 4300자리는 한계 안이므로 평소대로 범위 오류가 나야 한다 - 경계를
+    # 한 자리 넘겨 잡는 과잉 거부가 아님을 고정한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["count_min"] = 10 ** 4299
+    with pytest.raises(RecipeError, match="범위"):
+        parse_recipe(d)

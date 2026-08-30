@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -357,14 +358,46 @@ def load_recipe(path: str | Path) -> Recipe:
     p = Path(path)
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:
+        # ValueError covers json.JSONDecodeError and the int-literal length limit
+        # CPython enforces while parsing (sys.get_int_max_str_digits).
         raise RecipeError(f"recipe 읽기 실패: {p} - {e}") from e
     return parse_recipe(data)
+
+
+def _reject_unstringifiable_ints(data: Any) -> None:
+    """Reject integers CPython refuses to render as text.
+
+    Past ``sys.get_int_max_str_digits()`` (4300 by default) int-to-str raises
+    ValueError, and every diagnostic path converts values to text - the error
+    messages below and the canonical JSON behind the fingerprint alike - so such
+    a value would escape the loader as ValueError instead of RecipeError.  A
+    recipe *file* cannot carry one (json.loads rejects the literal first), so
+    this guards the in-memory parse_recipe() entry point.  Reported by bit
+    length, which needs no string conversion.
+    """
+    stack: list[Any] = [data]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(node.keys())
+            stack.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            stack.extend(node)
+        elif isinstance(node, int) and not isinstance(node, bool):
+            try:
+                str(node)
+            except ValueError:
+                raise RecipeError(
+                    f"정수가 너무 커 문자열로 표현할 수 없음: {node.bit_length()}비트 "
+                    f"(한계 {sys.get_int_max_str_digits()}자리)"
+                ) from None
 
 
 def parse_recipe(data: dict) -> Recipe:
     if not isinstance(data, dict):
         raise RecipeError(f"recipe 루트는 JSON 객체여야 함 - {type(data).__name__}")
+    _reject_unstringifiable_ints(data)
     errors: list[str] = []
 
     _check_unknown_keys(errors, "", data, "")
