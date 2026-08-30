@@ -1,6 +1,7 @@
 """Recipe loader — the schema side of Design Law L1 (dead parameters cannot load)."""
 import copy
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -464,14 +465,33 @@ def test_out_of_range_bound_reports_range_error_not_a_pair_error():
     assert "통과할 수 없는 구간" not in message, "범위 실패값이 짝 비교까지 흘러갔다"
 
 
-def test_non_finite_bound_rejected():
-    # json 은 NaN/Infinity 를 그대로 읽는다. 범위 검사가 걸러야 하고,
-    # 짝 비교까지 흘러가면 안 된다.
-    for bad in (float("nan"), float("inf")):
-        d = _sample_dict()
-        d["rois"][0]["rules"][0]["area_min"] = bad
-        with pytest.raises(RecipeError):
-            parse_recipe(d)
+@pytest.mark.parametrize(
+    "key", ["area_min", "count_min", "count_max", "continuity_min", "aspect_ratio_min"]
+)
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_bound_rejected(key, bad):
+    # json.loads 는 NaN/Infinity 를 그대로 읽는다. int 계열(count_*)에서는
+    # int() 가 유한성 검사보다 먼저 돌면 ValueError/OverflowError 로 탈출한다 -
+    # frac 계열만 확인하면 그 경로를 통째로 놓친다.
+    d = _sample_dict()
+    rule = 1 if key == "continuity_min" else 0
+    d["rois"][0]["rules"][rule][key] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_non_finite_bound_rejected_through_the_file_path(tmp_path):
+    # load_recipe() 경로에서도 같아야 한다 - 실제 레시피 파일로 재현되는 결함이었다.
+    d = _sample_dict()
+    path = tmp_path / "nonfinite.json"
+    path.write_text(
+        json.dumps(d).replace('"count_min": 1', '"count_min": NaN'), encoding="utf-8"
+    )
+    assert math.isnan(json.loads(path.read_text(encoding="utf-8"))
+                      ["rois"][0]["rules"][0]["count_min"])
+
+    with pytest.raises(RecipeError):
+        load_recipe(path)
 
 
 def test_non_integer_count_bound_reports_only_the_integer_error():

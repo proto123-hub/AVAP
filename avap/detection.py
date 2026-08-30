@@ -418,8 +418,12 @@ def measure_blobs(mask: DetectionMask) -> tuple[BlobMeasurement, ...]:
         # as the unit square it is restores that symmetry, and guarantees both
         # sides >= 1 (the rect must contain at least one whole unit square), so
         # the ratio is finite without a special case.
+        # Expand the hull, not the whole contour: minAreaRect depends only on the
+        # convex hull, and conv(A + S) == conv(A) + conv(S) for convex S, so the
+        # rect is identical while the point set stays tiny.  A sawtooth component
+        # measured 24,802 contour points against 8 hull points.
         corners = np.concatenate(
-            [contour.reshape(-1, 2) + offset for offset in _PIXEL_CORNERS]
+            [hull.reshape(-1, 2) + offset for offset in _PIXEL_CORNERS]
         ).astype(np.float32)
         (_centre, (rect_w, rect_h), _angle) = cv2.minAreaRect(corners)
         long_side, short_side = max(rect_w, rect_h), min(rect_w, rect_h)

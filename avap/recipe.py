@@ -274,6 +274,12 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             errors.append(f"{where}.{key}: 숫자여야 함 - {value!r}")
             continue
+        if not math.isfinite(value):
+            # json.loads accepts NaN/Infinity, and int() raises on both - so this
+            # has to reject before any conversion, not after a range comparison
+            # (every comparison against NaN is False, range checks included).
+            errors.append(f"{where}.{key}: 유한한 수여야 함 - {value!r}")
+            continue
         ok = True
         if kind == "int" and int(value) != value:
             errors.append(f"{where}.{key}: 정수여야 함 - {value!r}")
