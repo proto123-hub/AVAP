@@ -420,8 +420,9 @@ def measure_blobs(mask: DetectionMask) -> tuple[BlobMeasurement, ...]:
         # the ratio is finite without a special case.
         # Expand the hull, not the whole contour: minAreaRect depends only on the
         # convex hull, and conv(A + S) == conv(A) + conv(S) for convex S, so the
-        # rect is identical while the point set stays tiny.  A sawtooth component
-        # measured 24,802 contour points against 8 hull points.
+        # rect is identical while the point set stays bounded by the hull.  A
+        # ragged component can carry orders of magnitude more contour points than
+        # hull vertices, and expanding quadruples whichever one it is given.
         corners = np.concatenate(
             [hull.reshape(-1, 2) + offset for offset in _PIXEL_CORNERS]
         ).astype(np.float32)

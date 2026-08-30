@@ -480,6 +480,32 @@ def test_non_finite_bound_rejected(key, bad):
         parse_recipe(d)
 
 
+@pytest.mark.parametrize(
+    "key", ["area_min", "count_min", "count_max", "continuity_min", "aspect_ratio_min"]
+)
+@pytest.mark.parametrize("big", [10**309, -(10**309), 10**400])
+def test_oversized_integer_bound_rejected(key, big):
+    # json 은 임의 정밀도 정수를 그대로 읽는다. 유한성 검사를 float 로 좁히지
+    # 않으면 isfinite() 가 float 변환에서 OverflowError 로 탈출한다 -
+    # 파이썬 int 는 언제나 유한하므로 검사 대상이 아니다.
+    d = _sample_dict()
+    rule = 1 if key == "continuity_min" else 0
+    d["rois"][0]["rules"][rule][key] = big
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_oversized_integer_bound_rejected_through_the_file_path(tmp_path):
+    d = _sample_dict()
+    path = tmp_path / "oversized.json"
+    path.write_text(
+        json.dumps(d).replace('"count_min": 1', f'"count_min": {10 ** 309}'),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
 def test_non_finite_bound_rejected_through_the_file_path(tmp_path):
     # load_recipe() 경로에서도 같아야 한다 - 실제 레시피 파일로 재현되는 결함이었다.
     d = _sample_dict()
