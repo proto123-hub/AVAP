@@ -374,33 +374,62 @@ def load_recipe(path: str | Path) -> Recipe:
     p = Path(path)
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:
         # ValueError covers json.JSONDecodeError and the int-literal length limit
-        # CPython enforces while parsing (sys.get_int_max_str_digits).
-        raise RecipeError(f"recipe 읽기 실패: {p} - {e}") from e
+        # CPython enforces while parsing (sys.get_int_max_str_digits);
+        # RecursionError covers a deeply nested document, which json.loads parses
+        # recursively and gives up on around depth 994.
+        raise RecipeError(f"recipe 읽기 실패: {p} - {type(e).__name__}") from e
     return parse_recipe(data)
 
 
-def _reject_unstringifiable_ints(data: Any) -> None:
-    """Reject integers CPython refuses to render as text.
+# Deep enough for any real recipe (the sample nests 6 levels) and far below the
+# depth at which the recursive walkers below - _freeze, json.dumps - blow the
+# stack, measured at 332.
+_MAX_JSON_DEPTH = 100
 
-    Past ``sys.get_int_max_str_digits()`` (4300 by default) int-to-str raises
-    ValueError, and every diagnostic path converts values to text - the error
-    messages below and the canonical JSON behind the fingerprint alike - so such
-    a value would escape the loader as ValueError instead of RecipeError.  A
-    recipe *file* cannot carry one (json.loads rejects the literal first), so
-    this guards the in-memory parse_recipe() entry point.  Reported by bit
-    length, which needs no string conversion.
+
+def _reject_unrepresentable(data: Any) -> None:
+    """Reject input the loader cannot even describe, before validation starts.
+
+    Validation reports problems by rendering values into messages, and computes
+    the fingerprint by serialising the whole document.  Input that defeats
+    either escapes as some foreign exception rather than RecipeError, so it is
+    refused here once, for the document as a whole:
+
+    * an int past ``sys.get_int_max_str_digits()`` - ``str()`` raises
+    * a string holding a lone surrogate - ``encode("utf-8")`` raises, and a JSON
+      file can carry one as a plain ASCII ``\\udNNN`` escape
+    * a non-string dict key - ``key.startswith()`` and ``sort_keys=True`` raise
+    * a value outside the JSON types (set, bytes, Decimal) - ``json.dumps`` raises
+    * nesting past ``_MAX_JSON_DEPTH`` - the recursive walkers hit RecursionError
+
+    Reported without rendering the offending value, since rendering is exactly
+    what fails.
     """
-    stack: list[Any] = [data]
+    stack: list[tuple[Any, int]] = [(data, 0)]
     while stack:
-        node = stack.pop()
+        node, depth = stack.pop()
+        if depth > _MAX_JSON_DEPTH:
+            raise RecipeError(
+                f"중첩이 너무 깊음: {_MAX_JSON_DEPTH}단계를 넘는 구조는 검증할 수 없다"
+            )
         if isinstance(node, dict):
-            stack.extend(node.keys())
-            stack.extend(node.values())
+            for key, value in node.items():
+                if not isinstance(key, str):
+                    raise RecipeError(
+                        f"JSON 객체의 키는 문자열이어야 함 - {type(key).__name__}"
+                    )
+                _reject_untextable(key, "키")
+                stack.append((value, depth + 1))
         elif isinstance(node, (list, tuple)):
-            stack.extend(node)
-        elif isinstance(node, int) and not isinstance(node, bool):
+            for item in node:
+                stack.append((item, depth + 1))
+        elif isinstance(node, str):
+            _reject_untextable(node, "문자열")
+        elif isinstance(node, bool) or node is None or isinstance(node, float):
+            continue
+        elif isinstance(node, int):
             try:
                 str(node)
             except ValueError:
@@ -408,12 +437,24 @@ def _reject_unstringifiable_ints(data: Any) -> None:
                     f"정수가 너무 커 문자열로 표현할 수 없음: {node.bit_length()}비트 "
                     f"(한계 {sys.get_int_max_str_digits()}자리)"
                 ) from None
+        else:
+            raise RecipeError(f"JSON 값이 아님: {type(node).__name__}")
+
+
+def _reject_untextable(text: str, what: str) -> None:
+    """Reject a string that cannot be encoded as UTF-8 (a lone surrogate)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise RecipeError(
+            f"UTF-8 로 인코딩할 수 없는 {what} - {e.reason} (위치 {e.start})"
+        ) from None
 
 
 def parse_recipe(data: dict) -> Recipe:
     if not isinstance(data, dict):
         raise RecipeError(f"recipe 루트는 JSON 객체여야 함 - {type(data).__name__}")
-    _reject_unstringifiable_ints(data)
+    _reject_unrepresentable(data)
     errors: list[str] = []
 
     _check_unknown_keys(errors, "", data, "")

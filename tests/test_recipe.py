@@ -687,6 +687,10 @@ def _all_paths(node, prefix=()):
 # 타입이 어긋나는 값 12종. 숫자만 넣으면 iterable/hashable 가정이 깨지는 자리를
 # 못 본다 - rect_golden=null 의 TypeError 와 tool=[] 의 unhashable 이 그랬다.
 FOREIGN_VALUES = [
+    pytest.param("\ud800", id="lone-surrogate"),   # UTF-8 인코딩 불가, JSON 은 수용
+    pytest.param({1: "a"}, id="int-key"),           # key.startswith / sort_keys 가 터진다
+    pytest.param({1, 2}, id="set"),                 # JSON 타입이 아니다
+    pytest.param(b"x", id="bytes"),
     pytest.param(None, id="null"),
     pytest.param(True, id="true"),
     pytest.param(False, id="false"),
@@ -761,3 +765,100 @@ def test_type_confused_field_in_a_file_reports_recipe_error(tmp_path, path, bad)
     file_path.write_text(json.dumps(d), encoding="utf-8")
     with pytest.raises(RecipeError):
         load_recipe(file_path)
+
+
+def _nested(depth):
+    node = {}
+    cursor = node
+    for _ in range(depth):
+        cursor["_x"] = {}
+        cursor = cursor["_x"]
+    return node
+
+
+def test_lone_surrogate_reports_recipe_error(tmp_path):
+    # \ud800 은 순수 ASCII 인 \\udNNN 이스케이프로 JSON 파일에 담기고 json.loads 도
+    # 수용한다. 그런데 fingerprint 의 canonical.encode("utf-8") 에서 터진다 -
+    # 손 편집이나 UTF-16 왕복을 거친 레시피 파일 하나면 재현된다.
+    d = _sample_dict()
+    d["meta"]["recipe_id"] = "\ud800"
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+    path = tmp_path / "surrogate.json"
+    path.write_text(
+        json.dumps(_sample_dict()).replace('"SYNTH_BEAD_V1"', '"\\ud800"'), encoding="utf-8"
+    )
+    assert path.read_text(encoding="utf-8").count("\\ud800") == 1   # 파일에는 이스케이프로 들어간다
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+@pytest.mark.parametrize("where", ["detect", "rule"])
+def test_nesting_past_the_depth_limit_reports_recipe_error(where):
+    # _freeze/_immutable 은 재귀라 깊은 구조에서 RecursionError 로 터진다(실측 332단계).
+    # 한계를 그보다 훨씬 낮게 두고 진입점에서 거부한다.
+    d = _sample_dict()
+    target = d["rois"][0]["detect"] if where == "detect" else d["rois"][0]["rules"][0]
+    target["_note"] = _nested(400)
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_nesting_within_the_depth_limit_still_validates_normally():
+    # 과잉 거부가 아님을 고정한다 - 한계 안의 깊이는 평소대로 통과한다.
+    d = _sample_dict()
+    d["rois"][0]["detect"]["_note"] = _nested(50)
+    parse_recipe(d)
+
+
+def test_deeply_nested_file_reports_recipe_error(tmp_path):
+    # json.loads 자체가 깊이 994 근처에서 RecursionError 를 낸다.
+    # load_recipe 의 except 가 그것도 감싸야 파일 경로 계약이 닫힌다.
+    text = json.dumps(_sample_dict())
+    path = tmp_path / "deep.json"
+    path.write_text(text[:-1] + ',"_a":' + "[" * 1200 + "]" * 1200 + "}", encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+@pytest.mark.parametrize("bad", [{1, 2}, b"x", 1 + 2j, object()])
+def test_non_json_value_reports_recipe_error(bad):
+    # json.dumps 가 직렬화하지 못하는 값은 fingerprint 계산에서 TypeError 를 낸다.
+    d = _sample_dict()
+    d["meta"]["created_by"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("block", [("golden",), ("rois", 0, "rules", 0), ("alignment",)])
+def test_non_string_dict_key_reports_recipe_error(block):
+    # key.startswith() 와 json.dumps(sort_keys=True) 가 비문자열 키에서 터진다.
+    d = _sample_dict()
+    node = d
+    for step in block:
+        node = node[step]
+    node[7] = "x"
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("block", [("meta",), ("golden",), ("rois", 0, "detect")])
+def test_lone_surrogate_in_a_dict_key_reports_recipe_error(block):
+    # 91곳 프로브는 *값* 만 주입한다. 키에 들어간 서로게이트도 fingerprint 의
+    # json.dumps -> encode("utf-8") 에서 똑같이 터진다 - 값 검사만으로는 못 막는다.
+    d = _sample_dict()
+    node = d
+    for step in block:
+        node = node[step]
+    node["\ud800"] = 1
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_lone_surrogate_key_in_a_file_reports_recipe_error(tmp_path):
+    path = tmp_path / "surrogate_key.json"
+    text = json.dumps(_sample_dict())
+    path.write_text(text.replace('"recipe_id"', '"\\ud800"', 1), encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(path)
