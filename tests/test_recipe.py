@@ -553,21 +553,89 @@ def _set_path(data, path, value):
     node[path[-1]] = value
 
 
-OVERSIZED = 10 ** 4300   # 4301자리 - CPython 기본 문자열 변환 한계(4300)를 넘는다
+# 큰 정수가 로더를 깨뜨리는 방식은 크기대에 따라 다르다.
+#   ~1e308 초과  : math.isfinite() 의 float 변환이 OverflowError
+#   4300자리 초과 : str()/repr()/json.dumps 가 ValueError
+# 두 대역을 다 덮지 않으면 한쪽만 막고 통과한다 - 초안이 4301자리만 써서
+# 310~4300자리 대역을 23개 위치에서 놓쳤다.
+# pytest 는 파라미터 id 를 만들며 값을 문자열화하므로 id 를 직접 준다 -
+# 그러지 않으면 4301자리에서 수집 단계가 ValueError 로 죽는다.
+BIG_INTS = [
+    pytest.param(10 ** 309, id="1e309"),        # float 범위 초과, 문자열화는 가능
+    pytest.param(-(10 ** 309), id="-1e309"),
+    pytest.param(10 ** 400, id="1e400"),
+    pytest.param(-(10 ** 400), id="-1e400"),
+    pytest.param(10 ** 4299, id="4300digits"),  # 문자열화 한계 바로 아래
+    pytest.param(-(10 ** 4299), id="-4300digits"),
+    pytest.param(10 ** 4300, id="4301digits"),  # 문자열화 불가
+    pytest.param(-(10 ** 4300), id="-4301digits"),
+]
+BIG_INT_VALUES = [10 ** 309, -(10 ** 309), 10 ** 400, -(10 ** 400),
+                  10 ** 4299, -(10 ** 4299), 10 ** 4300, -(10 ** 4300)]
 
 
-def test_oversized_integer_at_any_numeric_field_reports_recipe_error():
-    # 거대 정수는 오류 메시지의 repr 과 fingerprint 의 json.dumps 양쪽에서
-    # ValueError 로 터진다. 메시지 자리를 하나씩 고치는 대신 진입점에서 막았고,
-    # 그 총체성을 샘플 레시피의 모든 숫자 위치에 주입해 확인한다.
+@pytest.mark.parametrize("big", BIG_INTS)
+def test_no_big_integer_escapes_the_loader_as_a_foreign_exception(big):
+    # 로더의 계약은 "항상 거부"가 아니라 "RecipeError 외의 예외를 내지 않는다"다.
+    # meta.recipe_version 처럼 상한이 없는 필드는 큰 정수를 정상 수용할 수 있다.
     paths = list(_numeric_paths(_sample_dict()))
-    assert len(paths) > 20, f"주입 지점이 너무 적다: {len(paths)}"
+    assert len(paths) > 40, f"주입 지점이 너무 적다: {len(paths)}"
 
+    escaped = []
     for path in paths:
         d = _sample_dict()
-        _set_path(d, path, OVERSIZED)
+        _set_path(d, path, big)
+        try:
+            parse_recipe(d)
+        except RecipeError:
+            pass
+        except Exception as exc:                      # noqa: BLE001 - 그게 결함이다
+            escaped.append(f"{'.'.join(map(str, path))}: {type(exc).__name__}")
+    assert not escaped, f"RecipeError 가 아닌 예외로 탈출: {escaped}"
+
+
+def test_big_integer_in_a_bounded_field_is_actually_rejected():
+    # 위 테스트는 예외 종류만 본다. 범위가 있는 필드에서는 실제로 거부돼야 한다.
+    for big in BIG_INT_VALUES:
+        for rule, key in [(0, "count_min"), (0, "area_min"), (1, "min")]:
+            d = _sample_dict()
+            d["rois"][0]["rules"][rule][key] = big
+            with pytest.raises(RecipeError):
+                parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["anchors"][0]["origin"][0] = big
         with pytest.raises(RecipeError):
             parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["anchors"][0]["min_score"] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["pose_gates"]["max_rotation_deg"] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+        d = _sample_dict()
+        d["rois"][0]["rect_golden"][0] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+
+
+@pytest.mark.parametrize("digits", [310, 401, 4300, 4301])
+def test_big_integer_literal_in_a_file_never_escapes(tmp_path, digits):
+    # 파일 경로도 같은 계약이다. 4301자리는 json.loads 가, 그 아래는 검증이 막는다.
+    d = _sample_dict()
+    literal = "1" + "0" * (digits - 1)
+    path = tmp_path / f"big_{digits}.json"
+    path.write_text(
+        json.dumps(d).replace(
+            json.dumps(d["alignment"]["anchors"][0]["origin"]),
+            "[" + literal + ", 0.1, 0.1, 0.1]",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
 
 
 def test_oversized_integer_literal_in_a_file_reports_recipe_error(tmp_path):
@@ -589,3 +657,16 @@ def test_integer_at_the_stringify_limit_still_validates_normally():
     d["rois"][0]["rules"][0]["count_min"] = 10 ** 4299
     with pytest.raises(RecipeError, match="범위"):
         parse_recipe(d)
+
+
+def test_frame_exiting_anchor_rect_reports_only_its_own_error():
+    # origin 이 프레임을 벗어나면 그 오류만 나야 한다. 포함관계 검사까지 돌면
+    # 진짜 원인 위에 "search 가 origin 을 못 덮는다"가 얹혀 원인을 흐린다.
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["origin"] = [0.9, 0.9, 0.5, 0.5]   # 0~1 안이지만 x+w>1
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "골든 프레임을 벗어남" in message
+    assert "origin 전체를 포함해야 함" not in message, "무효 rect 로 포함관계를 계산했다"

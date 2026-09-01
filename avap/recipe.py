@@ -216,6 +216,19 @@ def _check_unknown_keys(errors: list[str], where: str, block: Any, allowed_id: s
             )
 
 
+def _is_finite_number(value: Any) -> bool:
+    """True only for a real, finite number; bool and non-numbers are excluded.
+
+    A Python int is always finite, and ``math.isfinite`` would first convert one
+    to a float - raising OverflowError past ~1e308 - so ints short-circuit before
+    the check.  Every numeric field routes through here precisely so that no path
+    can end up guarded while another is not.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isinstance(value, int) or math.isfinite(value)
+
+
 def _check_frac(errors: list[str], where: str, value: Any, hi: float = 1.0) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0.0 < value <= hi):
         errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) - {value!r}")
@@ -233,18 +246,26 @@ def _immutable(v: Any) -> Any:
     return v
 
 
-def _check_rect(errors: list[str], where: str, rect: Any) -> None:
+def _check_rect(errors: list[str], where: str, rect: Any) -> bool:
+    """Validate one [x, y, w, h] rect; return whether it came out usable.
+
+    Callers that go on to do arithmetic across two rects need the answer, not
+    just the recorded error: comparing an out-of-range value is not merely
+    pointless, it raises - a huge int against a float bound overflows.
+    """
     if (not isinstance(rect, list)) or len(rect) != 4 or not all(
-        isinstance(v, (int, float)) and not isinstance(v, bool)
-        and math.isfinite(v) for v in rect
+        _is_finite_number(v) for v in rect
     ):
         errors.append(f"{where}: [x, y, w, h] 4개 숫자여야 함 - {rect!r}")
-        return
+        return False
     x, y, w, h = rect
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
         errors.append(f"{where}: 좌표는 0~1 분수여야 함 (L7) - {rect!r}")
-    elif x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
+        return False
+    if x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
         errors.append(f"{where}: 사각형이 골든 프레임을 벗어남 - {rect!r}")
+        return False
+    return True
 
 
 def _check_params(errors: list[str], where: str, tool: str, params: dict) -> None:
@@ -272,15 +293,10 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             ):
                 errors.append(f"{where}.{key}: [h, s, v] 각 0~1 이어야 함 - {value!r}")
             continue
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            errors.append(f"{where}.{key}: 숫자여야 함 - {value!r}")
-            continue
-        if isinstance(value, float) and not math.isfinite(value):
-            # json.loads accepts NaN/Infinity, and int() raises on both - so this
-            # has to reject before any conversion, not after a range comparison
-            # (every comparison against NaN is False, range checks included).
-            # Guarded on float: a Python int is always finite, and isfinite()
-            # would convert one too large for a float and raise OverflowError.
+        if not _is_finite_number(value):
+            # json.loads accepts NaN/Infinity, and int() raises on both, so this
+            # must reject before any conversion - not after a range comparison,
+            # since every comparison against NaN is False.
             errors.append(f"{where}.{key}: 유한한 수여야 함 - {value!r}")
             continue
         ok = True
@@ -460,18 +476,17 @@ def parse_recipe(data: dict) -> Recipe:
         for k in ("id", "origin", "search"):
             if k not in a:
                 errors.append(f"{where}: '{k}' 누락")
-        _check_rect(errors, f"{where}.origin", a.get("origin", []))
-        _check_rect(errors, f"{where}.search", a.get("search", []))
+        origin_ok = _check_rect(errors, f"{where}.origin", a.get("origin", []))
+        search_ok = _check_rect(errors, f"{where}.search", a.get("search", []))
         anchor_id = a.get("id")
         if not isinstance(anchor_id, str) or not anchor_id.strip():
             errors.append(f"{where}.id: 비어 있지 않은 문자열이어야 함 - {anchor_id!r}")
         else:
             anchor_ids.append(anchor_id)
-        origin, search = a.get("origin"), a.get("search")
-        if (isinstance(origin, list) and len(origin) == 4
-                and isinstance(search, list) and len(search) == 4
-                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                        and math.isfinite(v) for v in origin + search)):
+        # Containment only means anything for two rects that already validated;
+        # comparing an out-of-range value would overflow before it could fail.
+        if origin_ok and search_ok:
+            origin, search = a["origin"], a["search"]
             ox, oy, ow, oh = origin
             sx, sy, sw, sh = search
             if (ox < sx - 1e-9 or oy < sy - 1e-9
@@ -479,8 +494,7 @@ def parse_recipe(data: dict) -> Recipe:
                     or oy + oh > sy + sh + 1e-9):
                 errors.append(f"{where}.search: origin 전체를 포함해야 함")
         score = a.get("min_score", 0.7)
-        if (not isinstance(score, (int, float)) or isinstance(score, bool)
-                or not math.isfinite(score) or not (0.0 < score <= 1.0)):
+        if not _is_finite_number(score) or not (0.0 < score <= 1.0):
             errors.append(f"{where}.min_score: 0~1 이어야 함 - {score!r}")
         if not errors:
             anchors.append(
@@ -507,9 +521,7 @@ def parse_recipe(data: dict) -> Recipe:
     _check_frac(errors, "pose_gates.max_shift_frac", gates.get("max_shift_frac", 0.05))
     _check_frac(errors, "pose_gates.scale_tol", gates.get("scale_tol", 0.02))
     max_rot = gates.get("max_rotation_deg", 3.0)
-    if (not isinstance(max_rot, (int, float)) or isinstance(max_rot, bool)
-            or not math.isfinite(max_rot)
-            or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT)):
+    if not _is_finite_number(max_rot) or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT):
         errors.append(
             f"pose_gates.max_rotation_deg: 0~{MAX_ROTATION_DEG_LIMIT} 이어야 함 - {max_rot!r}"
         )
