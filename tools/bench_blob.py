@@ -9,10 +9,12 @@ variant with each choice undone and reports whether the results still agree.
 Deterministic: no timings, so two runs print identical bytes.  Output is
 ASCII-punctuation only, so a Windows CP949 console can print it.
 
-    python tools/bench_blob.py
+    python tools/bench_blob.py            # from the repository root
+    python /path/to/avap/tools/bench_blob.py   # from anywhere, by full path
 
-Needs only what the package already needs (numpy, opencv-python).  Run it from
-anywhere - the repository root is put on sys.path below.
+Needs only what the package already needs (numpy, opencv-python).  The import
+works from any working directory because the repository root is put on sys.path
+below; only the *relative* command above assumes you are at the root.
 """
 import pathlib
 import sys

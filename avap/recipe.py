@@ -536,7 +536,7 @@ def parse_recipe(data: dict) -> Recipe:
         r = _dict_of(errors, where, r)
         roi_id = r.get("id") or f"roi_{i}"
         _check_unknown_keys(errors, where, r, "rois[]")
-        _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
+        rect_ok = _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
         detect = _dict_of(errors, f"{where}.detect", r.get("detect", _MISSING))
         _check_unknown_keys(errors, f"{where}.detect", detect, "rois[].detect")
         if detect.get("space", "hsv") != "hsv":
@@ -589,13 +589,21 @@ def parse_recipe(data: dict) -> Recipe:
             if tool is None:
                 errors.append(f"{rwhere}: 'tool' 누락")
                 continue
+            if not isinstance(tool, str):
+                # PARAM_SPECS.get(tool) below needs a hashable key: a list or
+                # dict here raises TypeError instead of recording an error.
+                errors.append(f"{rwhere}.tool: 문자열이어야 함 - {tool!r}")
+                continue
             _check_params(errors, rwhere, tool, params)
             rules.append(Rule(tool=str(tool), params=_freeze(params)))
         rois.append(
             Roi(
                 id=str(roi_id),
                 label=str(r.get("label", roi_id)),
-                rect_golden=tuple(r.get("rect_golden", (0, 0, 1, 1))),
+                # A rect that failed validation is not iterable in general
+                # (null / true / 7 all reach here); the placeholder never leaves
+                # this function because `errors` is non-empty and raises below.
+                rect_golden=tuple(r["rect_golden"]) if rect_ok else (0.0, 0.0, 1.0, 1.0),
                 detect=_freeze(detect),
                 rules=tuple(rules),
             )

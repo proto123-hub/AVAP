@@ -670,3 +670,94 @@ def test_frame_exiting_anchor_rect_reports_only_its_own_error():
     message = str(excinfo.value)
     assert "골든 프레임을 벗어남" in message
     assert "origin 전체를 포함해야 함" not in message, "무효 rect 로 포함관계를 계산했다"
+
+
+def _all_paths(node, prefix=()):
+    """Every addressable position in the recipe - leaves and containers alike."""
+    if prefix:
+        yield prefix
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _all_paths(v, prefix + (k,))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _all_paths(v, prefix + (i,))
+
+
+# 타입이 어긋나는 값 12종. 숫자만 넣으면 iterable/hashable 가정이 깨지는 자리를
+# 못 본다 - rect_golden=null 의 TypeError 와 tool=[] 의 unhashable 이 그랬다.
+FOREIGN_VALUES = [
+    pytest.param(None, id="null"),
+    pytest.param(True, id="true"),
+    pytest.param(False, id="false"),
+    pytest.param(0, id="zero"),
+    pytest.param(-1, id="negative"),
+    pytest.param(1.5, id="float"),
+    pytest.param("", id="empty-str"),
+    pytest.param("x", id="str"),
+    pytest.param([], id="empty-list"),
+    pytest.param({}, id="empty-dict"),
+    pytest.param([1, 2], id="list"),
+    pytest.param({"a": 1}, id="dict"),
+]
+
+
+@pytest.mark.parametrize("value", FOREIGN_VALUES)
+def test_no_schema_position_escapes_the_loader_as_a_foreign_exception(value):
+    # 로더 총체성: 어떤 위치에 어떤 JSON 값이 들어와도 RecipeError 아니면 통과다.
+    # 다른 예외로 나가면 호출자가 "검증 실패"와 "로더 버그"를 구분할 수 없다.
+    paths = list(_all_paths(_sample_dict()))
+    assert len(paths) > 80, f"주입 지점이 너무 적다: {len(paths)}"
+
+    escaped = []
+    for path in paths:
+        d = _sample_dict()
+        try:
+            _set_path(d, path, value)
+        except (TypeError, KeyError, IndexError):
+            continue                       # 앞선 주입으로 구조가 바뀐 경로는 건너뛴다
+        try:
+            parse_recipe(d)
+        except RecipeError:
+            pass
+        except Exception as exc:           # noqa: BLE001 - 그게 결함이다
+            escaped.append(f"{'.'.join(map(str, path))}: {type(exc).__name__}")
+    assert not escaped, f"RecipeError 가 아닌 예외로 탈출: {escaped}"
+
+
+@pytest.mark.parametrize("bad", [None, True, 7, "x", {}])
+def test_non_rect_rect_golden_reports_recipe_error(bad):
+    # null/true/7 은 tuple() 이 불가능하다. 검증 실패 뒤에도 모델을 만들면
+    # "iterable 이 아니다"로 탈출한다.
+    d = _sample_dict()
+    d["rois"][0]["rect_golden"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("bad", [[], {}, [1], {"a": 1}])
+def test_unhashable_tool_reports_recipe_error(bad):
+    # PARAM_SPECS.get(tool) 은 해시 가능한 키를 요구한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["tool"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize(
+    "path,bad",
+    [
+        (("rois", 0, "rect_golden"), None),
+        (("rois", 0, "rect_golden"), 7),
+        (("rois", 0, "rules", 0, "tool"), []),
+        (("rois", 0, "rules", 0, "tool"), {}),
+    ],
+)
+def test_type_confused_field_in_a_file_reports_recipe_error(tmp_path, path, bad):
+    # 파일 경로도 같은 계약이다 - 이 두 결함은 실제 JSON 으로도 재현됐다.
+    d = _sample_dict()
+    _set_path(d, path, bad)
+    file_path = tmp_path / "type_confused.json"
+    file_path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(file_path)
