@@ -1,11 +1,19 @@
 """Recipe loader — the schema side of Design Law L1 (dead parameters cannot load)."""
 import copy
 import json
+import math
 from pathlib import Path
 
 import pytest
 
-from avap.recipe import RecipeError, compute_fingerprint, load_recipe, parse_recipe
+from avap.recipe import (
+    PARAM_SPECS,
+    RecipeError,
+    _min_max_pairs,
+    compute_fingerprint,
+    load_recipe,
+    parse_recipe,
+)
 
 SAMPLE = Path(__file__).resolve().parents[1] / "recipes" / "sample_synth.json"
 
@@ -372,3 +380,485 @@ def test_absent_optional_blocks_still_use_defaults():
     d["rois"][0]["detect"].pop("morph", None)
     r = parse_recipe(d)
     assert r.alignment.scale_tol == 0.02  # 기본값
+
+
+def test_min_above_max_rejected():
+    # 통과 가능한 측정값이 존재하지 않는 구간은 로드 단계에서 막는다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 0.9
+    d["rois"][0]["rules"][0]["area_max"] = 0.1
+    with pytest.raises(RecipeError, match="area_min"):
+        parse_recipe(d)
+
+
+def test_bare_min_max_pair_is_checked_too():
+    # coverage 는 접두사 없는 min/max 를 쓴다 — 접미사 규칙이 이쪽도 잡아야 한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][1]["min"] = 0.8
+    d["rois"][0]["rules"][1]["max"] = 0.3
+    with pytest.raises(RecipeError, match="min"):
+        parse_recipe(d)
+
+
+def test_min_equal_to_max_is_allowed():
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 0.5
+    d["rois"][0]["rules"][0]["area_max"] = 0.5
+    parse_recipe(d)  # 한 점만 통과하는 구간은 모순이 아니다
+
+
+def test_min_max_sweep_pairs_exactly_the_bounds_that_have_partners():
+    # 짝짓기 결과를 고정한다. 스펙에 새 min/max 쌍이 생기면 여기서 먼저 깨지고,
+    # 짝 도출이 틀어져 없던 쌍을 만들어내도 깨진다.
+    # max_dist(짝 없는 거리 한계)와 solidity_min/continuity_min/iou_min 이
+    # 쌍으로 잡히지 않는다는 것이 이 테스트가 지키는 내용이다.
+    assert _min_max_pairs(PARAM_SPECS["blob"]) == (
+        ("count_min", "count_max"),
+        ("area_min", "area_max"),
+        ("circularity_min", "circularity_max"),
+        ("aspect_ratio_min", "aspect_ratio_max"),
+    )
+    assert _min_max_pairs(PARAM_SPECS["coverage"]) == (("min", "max"),)
+    assert _min_max_pairs(PARAM_SPECS["color_stats"]) == ()
+    assert _min_max_pairs(PARAM_SPECS["shape_compare"]) == ()
+
+
+def test_min_without_a_max_partner_loads():
+    # solidity_min / continuity_min 은 스펙에 짝이 없다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["solidity_min"] = 0.99
+    parse_recipe(d)
+
+
+def test_aspect_ratio_min_below_one_rejected():
+    # DESIGN 6.1: 측정값은 항상 >=1 이므로 0~1 구간은 도달 불가능한 죽은 구간이다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["aspect_ratio_min"] = 0.5
+    with pytest.raises(RecipeError, match="aspect_ratio_min"):
+        parse_recipe(d)
+    d["rois"][0]["rules"][0]["aspect_ratio_min"] = 1.0
+    parse_recipe(d)
+
+
+@pytest.mark.parametrize("bad", ["x", None, [0.1], {"a": 1}])
+def test_wrong_typed_bound_reports_recipe_error_not_typeerror(bad):
+    # 짝 비교가 개별 검증에 실패한 raw 값을 그대로 '>' 하면 TypeError 로 탈출한다.
+    # 로더의 계약은 어떤 입력에도 RecipeError 다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][1]["min"] = bad
+    d["rois"][0]["rules"][1]["max"] = 0.3
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_out_of_range_bound_reports_range_error_not_a_pair_error():
+    # 범위를 벗어난 값은 짝 비교 대상이 아니다. 5.0 > 0.1 이라 게이트가 없으면
+    # 진짜 원인(범위) 위에 짝 오류가 하나 더 얹혀 원인을 흐린다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["area_min"] = 5.0     # 0~1 밖
+    d["rois"][0]["rules"][0]["area_max"] = 0.1
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "범위" in message
+    assert "통과할 수 없는 구간" not in message, "범위 실패값이 짝 비교까지 흘러갔다"
+
+
+@pytest.mark.parametrize(
+    "key", ["area_min", "count_min", "count_max", "continuity_min", "aspect_ratio_min"]
+)
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_bound_rejected(key, bad):
+    # json.loads 는 NaN/Infinity 를 그대로 읽는다. int 계열(count_*)에서는
+    # int() 가 유한성 검사보다 먼저 돌면 ValueError/OverflowError 로 탈출한다 -
+    # frac 계열만 확인하면 그 경로를 통째로 놓친다.
+    d = _sample_dict()
+    rule = 1 if key == "continuity_min" else 0
+    d["rois"][0]["rules"][rule][key] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize(
+    "key", ["area_min", "count_min", "count_max", "continuity_min", "aspect_ratio_min"]
+)
+@pytest.mark.parametrize("big", [10**309, -(10**309), 10**400])
+def test_oversized_integer_bound_rejected(key, big):
+    # json 은 임의 정밀도 정수를 그대로 읽는다. 유한성 검사를 float 로 좁히지
+    # 않으면 isfinite() 가 float 변환에서 OverflowError 로 탈출한다 -
+    # 파이썬 int 는 언제나 유한하므로 검사 대상이 아니다.
+    d = _sample_dict()
+    rule = 1 if key == "continuity_min" else 0
+    d["rois"][0]["rules"][rule][key] = big
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_oversized_integer_bound_rejected_through_the_file_path(tmp_path):
+    d = _sample_dict()
+    path = tmp_path / "oversized.json"
+    path.write_text(
+        json.dumps(d).replace('"count_min": 1', f'"count_min": {10 ** 309}'),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+def test_non_finite_bound_rejected_through_the_file_path(tmp_path):
+    # load_recipe() 경로에서도 같아야 한다 - 실제 레시피 파일로 재현되는 결함이었다.
+    d = _sample_dict()
+    path = tmp_path / "nonfinite.json"
+    path.write_text(
+        json.dumps(d).replace('"count_min": 1', '"count_min": NaN'), encoding="utf-8"
+    )
+    assert math.isnan(json.loads(path.read_text(encoding="utf-8"))
+                      ["rois"][0]["rules"][0]["count_min"])
+
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+def test_non_integer_count_bound_reports_only_the_integer_error():
+    # count_min/count_max 는 유일한 int 쌍이다. 정수 검증에 실패한 값이 짝
+    # 비교까지 흘러가면 진짜 원인 위에 짝 오류가 얹힌다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["count_min"] = 1.5
+    d["rois"][0]["rules"][0]["count_max"] = 0.5
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "정수" in message
+    assert "통과할 수 없는 구간" not in message, "정수 실패값이 짝 비교까지 흘러갔다"
+
+
+def _numeric_paths(node, prefix=()):
+    """Every path in the sample recipe whose leaf is a number."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _numeric_paths(v, prefix + (k,))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _numeric_paths(v, prefix + (i,))
+    elif isinstance(node, (int, float)) and not isinstance(node, bool):
+        yield prefix
+
+
+def _set_path(data, path, value):
+    node = data
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+
+
+# 큰 정수가 로더를 깨뜨리는 방식은 크기대에 따라 다르다.
+#   ~1e308 초과  : math.isfinite() 의 float 변환이 OverflowError
+#   4300자리 초과 : str()/repr()/json.dumps 가 ValueError
+# 두 대역을 다 덮지 않으면 한쪽만 막고 통과한다 - 초안이 4301자리만 써서
+# 310~4300자리 대역을 23개 위치에서 놓쳤다.
+# pytest 는 파라미터 id 를 만들며 값을 문자열화하므로 id 를 직접 준다 -
+# 그러지 않으면 4301자리에서 수집 단계가 ValueError 로 죽는다.
+BIG_INTS = [
+    pytest.param(10 ** 309, id="1e309"),        # float 범위 초과, 문자열화는 가능
+    pytest.param(-(10 ** 309), id="-1e309"),
+    pytest.param(10 ** 400, id="1e400"),
+    pytest.param(-(10 ** 400), id="-1e400"),
+    pytest.param(10 ** 4299, id="4300digits"),  # 문자열화 한계 바로 아래
+    pytest.param(-(10 ** 4299), id="-4300digits"),
+    pytest.param(10 ** 4300, id="4301digits"),  # 문자열화 불가
+    pytest.param(-(10 ** 4300), id="-4301digits"),
+]
+BIG_INT_VALUES = [10 ** 309, -(10 ** 309), 10 ** 400, -(10 ** 400),
+                  10 ** 4299, -(10 ** 4299), 10 ** 4300, -(10 ** 4300)]
+
+
+@pytest.mark.parametrize("big", BIG_INTS)
+def test_no_big_integer_escapes_the_loader_as_a_foreign_exception(big):
+    # 로더의 계약은 "항상 거부"가 아니라 "RecipeError 외의 예외를 내지 않는다"다.
+    # meta.recipe_version 처럼 상한이 없는 필드는 큰 정수를 정상 수용할 수 있다.
+    paths = list(_numeric_paths(_sample_dict()))
+    assert len(paths) > 40, f"주입 지점이 너무 적다: {len(paths)}"
+
+    escaped = []
+    for path in paths:
+        d = _sample_dict()
+        _set_path(d, path, big)
+        try:
+            parse_recipe(d)
+        except RecipeError:
+            pass
+        except Exception as exc:                      # noqa: BLE001 - 그게 결함이다
+            escaped.append(f"{'.'.join(map(str, path))}: {type(exc).__name__}")
+    assert not escaped, f"RecipeError 가 아닌 예외로 탈출: {escaped}"
+
+
+def test_big_integer_in_a_bounded_field_is_actually_rejected():
+    # 위 테스트는 예외 종류만 본다. 범위가 있는 필드에서는 실제로 거부돼야 한다.
+    for big in BIG_INT_VALUES:
+        for rule, key in [(0, "count_min"), (0, "area_min"), (1, "min")]:
+            d = _sample_dict()
+            d["rois"][0]["rules"][rule][key] = big
+            with pytest.raises(RecipeError):
+                parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["anchors"][0]["origin"][0] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["anchors"][0]["min_score"] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+        d = _sample_dict()
+        d["alignment"]["pose_gates"]["max_rotation_deg"] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+        d = _sample_dict()
+        d["rois"][0]["rect_golden"][0] = big
+        with pytest.raises(RecipeError):
+            parse_recipe(d)
+
+
+@pytest.mark.parametrize("digits", [310, 401, 4300, 4301])
+def test_big_integer_literal_in_a_file_never_escapes(tmp_path, digits):
+    # 파일 경로도 같은 계약이다. 4301자리는 json.loads 가, 그 아래는 검증이 막는다.
+    d = _sample_dict()
+    literal = "1" + "0" * (digits - 1)
+    path = tmp_path / f"big_{digits}.json"
+    path.write_text(
+        json.dumps(d).replace(
+            json.dumps(d["alignment"]["anchors"][0]["origin"]),
+            "[" + literal + ", 0.1, 0.1, 0.1]",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+def test_oversized_integer_literal_in_a_file_reports_recipe_error(tmp_path):
+    # json.loads 자체가 4301자리 리터럴을 ValueError 로 거부하므로,
+    # load_recipe 가 그것을 RecipeError 로 감싸야 파일 경로 계약이 닫힌다.
+    path = tmp_path / "oversized_literal.json"
+    path.write_text(
+        json.dumps(_sample_dict()).replace('"count_min": 1', '"count_min": 1' + "0" * 4300),
+        encoding="utf-8",
+    )
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+def test_integer_at_the_stringify_limit_still_validates_normally():
+    # 4300자리는 한계 안이므로 평소대로 범위 오류가 나야 한다 - 경계를
+    # 한 자리 넘겨 잡는 과잉 거부가 아님을 고정한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["count_min"] = 10 ** 4299
+    with pytest.raises(RecipeError, match="범위"):
+        parse_recipe(d)
+
+
+def test_frame_exiting_anchor_rect_reports_only_its_own_error():
+    # origin 이 프레임을 벗어나면 그 오류만 나야 한다. 포함관계 검사까지 돌면
+    # 진짜 원인 위에 "search 가 origin 을 못 덮는다"가 얹혀 원인을 흐린다.
+    d = _sample_dict()
+    d["alignment"]["anchors"][0]["origin"] = [0.9, 0.9, 0.5, 0.5]   # 0~1 안이지만 x+w>1
+    with pytest.raises(RecipeError) as excinfo:
+        parse_recipe(d)
+
+    message = str(excinfo.value)
+    assert "골든 프레임을 벗어남" in message
+    assert "origin 전체를 포함해야 함" not in message, "무효 rect 로 포함관계를 계산했다"
+
+
+def _all_paths(node, prefix=()):
+    """Every addressable position in the recipe - leaves and containers alike."""
+    if prefix:
+        yield prefix
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield from _all_paths(v, prefix + (k,))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _all_paths(v, prefix + (i,))
+
+
+# 타입이 어긋나는 값 12종. 숫자만 넣으면 iterable/hashable 가정이 깨지는 자리를
+# 못 본다 - rect_golden=null 의 TypeError 와 tool=[] 의 unhashable 이 그랬다.
+FOREIGN_VALUES = [
+    pytest.param("\ud800", id="lone-surrogate"),   # UTF-8 인코딩 불가, JSON 은 수용
+    pytest.param({1: "a"}, id="int-key"),           # key.startswith / sort_keys 가 터진다
+    pytest.param({1, 2}, id="set"),                 # JSON 타입이 아니다
+    pytest.param(b"x", id="bytes"),
+    pytest.param(None, id="null"),
+    pytest.param(True, id="true"),
+    pytest.param(False, id="false"),
+    pytest.param(0, id="zero"),
+    pytest.param(-1, id="negative"),
+    pytest.param(1.5, id="float"),
+    pytest.param("", id="empty-str"),
+    pytest.param("x", id="str"),
+    pytest.param([], id="empty-list"),
+    pytest.param({}, id="empty-dict"),
+    pytest.param([1, 2], id="list"),
+    pytest.param({"a": 1}, id="dict"),
+]
+
+
+@pytest.mark.parametrize("value", FOREIGN_VALUES)
+def test_no_schema_position_escapes_the_loader_as_a_foreign_exception(value):
+    # 로더 총체성: 어떤 위치에 어떤 JSON 값이 들어와도 RecipeError 아니면 통과다.
+    # 다른 예외로 나가면 호출자가 "검증 실패"와 "로더 버그"를 구분할 수 없다.
+    paths = list(_all_paths(_sample_dict()))
+    assert len(paths) > 80, f"주입 지점이 너무 적다: {len(paths)}"
+
+    escaped = []
+    for path in paths:
+        d = _sample_dict()
+        try:
+            _set_path(d, path, value)
+        except (TypeError, KeyError, IndexError):
+            continue                       # 앞선 주입으로 구조가 바뀐 경로는 건너뛴다
+        try:
+            parse_recipe(d)
+        except RecipeError:
+            pass
+        except Exception as exc:           # noqa: BLE001 - 그게 결함이다
+            escaped.append(f"{'.'.join(map(str, path))}: {type(exc).__name__}")
+    assert not escaped, f"RecipeError 가 아닌 예외로 탈출: {escaped}"
+
+
+@pytest.mark.parametrize("bad", [None, True, 7, "x", {}])
+def test_non_rect_rect_golden_reports_recipe_error(bad):
+    # null/true/7 은 tuple() 이 불가능하다. 검증 실패 뒤에도 모델을 만들면
+    # "iterable 이 아니다"로 탈출한다.
+    d = _sample_dict()
+    d["rois"][0]["rect_golden"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("bad", [[], {}, [1], {"a": 1}])
+def test_unhashable_tool_reports_recipe_error(bad):
+    # PARAM_SPECS.get(tool) 은 해시 가능한 키를 요구한다.
+    d = _sample_dict()
+    d["rois"][0]["rules"][0]["tool"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize(
+    "path,bad",
+    [
+        (("rois", 0, "rect_golden"), None),
+        (("rois", 0, "rect_golden"), 7),
+        (("rois", 0, "rules", 0, "tool"), []),
+        (("rois", 0, "rules", 0, "tool"), {}),
+    ],
+)
+def test_type_confused_field_in_a_file_reports_recipe_error(tmp_path, path, bad):
+    # 파일 경로도 같은 계약이다 - 이 두 결함은 실제 JSON 으로도 재현됐다.
+    d = _sample_dict()
+    _set_path(d, path, bad)
+    file_path = tmp_path / "type_confused.json"
+    file_path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(file_path)
+
+
+def _nested(depth):
+    node = {}
+    cursor = node
+    for _ in range(depth):
+        cursor["_x"] = {}
+        cursor = cursor["_x"]
+    return node
+
+
+def test_lone_surrogate_reports_recipe_error(tmp_path):
+    # \ud800 은 순수 ASCII 인 \\udNNN 이스케이프로 JSON 파일에 담기고 json.loads 도
+    # 수용한다. 그런데 fingerprint 의 canonical.encode("utf-8") 에서 터진다 -
+    # 손 편집이나 UTF-16 왕복을 거친 레시피 파일 하나면 재현된다.
+    d = _sample_dict()
+    d["meta"]["recipe_id"] = "\ud800"
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+    path = tmp_path / "surrogate.json"
+    path.write_text(
+        json.dumps(_sample_dict()).replace('"SYNTH_BEAD_V1"', '"\\ud800"'), encoding="utf-8"
+    )
+    assert path.read_text(encoding="utf-8").count("\\ud800") == 1   # 파일에는 이스케이프로 들어간다
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+@pytest.mark.parametrize("where", ["detect", "rule"])
+def test_nesting_past_the_depth_limit_reports_recipe_error(where):
+    # _freeze/_immutable 은 재귀라 깊은 구조에서 RecursionError 로 터진다(실측 332단계).
+    # 한계를 그보다 훨씬 낮게 두고 진입점에서 거부한다.
+    d = _sample_dict()
+    target = d["rois"][0]["detect"] if where == "detect" else d["rois"][0]["rules"][0]
+    target["_note"] = _nested(400)
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_nesting_within_the_depth_limit_still_validates_normally():
+    # 과잉 거부가 아님을 고정한다 - 한계 안의 깊이는 평소대로 통과한다.
+    d = _sample_dict()
+    d["rois"][0]["detect"]["_note"] = _nested(50)
+    parse_recipe(d)
+
+
+def test_deeply_nested_file_reports_recipe_error(tmp_path):
+    # json.loads 자체가 깊이 994 근처에서 RecursionError 를 낸다.
+    # load_recipe 의 except 가 그것도 감싸야 파일 경로 계약이 닫힌다.
+    text = json.dumps(_sample_dict())
+    path = tmp_path / "deep.json"
+    path.write_text(text[:-1] + ',"_a":' + "[" * 1200 + "]" * 1200 + "}", encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(path)
+
+
+@pytest.mark.parametrize("bad", [{1, 2}, b"x", 1 + 2j, object()])
+def test_non_json_value_reports_recipe_error(bad):
+    # json.dumps 가 직렬화하지 못하는 값은 fingerprint 계산에서 TypeError 를 낸다.
+    d = _sample_dict()
+    d["meta"]["created_by"] = bad
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("block", [("golden",), ("rois", 0, "rules", 0), ("alignment",)])
+def test_non_string_dict_key_reports_recipe_error(block):
+    # key.startswith() 와 json.dumps(sort_keys=True) 가 비문자열 키에서 터진다.
+    d = _sample_dict()
+    node = d
+    for step in block:
+        node = node[step]
+    node[7] = "x"
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+@pytest.mark.parametrize("block", [("meta",), ("golden",), ("rois", 0, "detect")])
+def test_lone_surrogate_in_a_dict_key_reports_recipe_error(block):
+    # 91곳 프로브는 *값* 만 주입한다. 키에 들어간 서로게이트도 fingerprint 의
+    # json.dumps -> encode("utf-8") 에서 똑같이 터진다 - 값 검사만으로는 못 막는다.
+    d = _sample_dict()
+    node = d
+    for step in block:
+        node = node[step]
+    node["\ud800"] = 1
+    with pytest.raises(RecipeError):
+        parse_recipe(d)
+
+
+def test_lone_surrogate_key_in_a_file_reports_recipe_error(tmp_path):
+    path = tmp_path / "surrogate_key.json"
+    text = json.dumps(_sample_dict())
+    path.write_text(text.replace('"recipe_id"', '"\\ud800"', 1), encoding="utf-8")
+    with pytest.raises(RecipeError):
+        load_recipe(path)

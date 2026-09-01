@@ -9,12 +9,16 @@ import numpy as np
 import pytest
 
 from avap.detection import (
+    BLOB_FILTERS,
+    BlobMeasurement,
     CoverageMeasurement,
     DetectionInputError,
     DetectionMask,
+    evaluate_blob,
     evaluate_coverage,
     make_mask,
     make_roi_mask,
+    measure_blobs,
     measure_coverage,
 )
 from avap.alignment import Aligner, AlignStatus, Pose
@@ -353,3 +357,273 @@ def test_coverage_verdict_is_invariant_across_recovered_poses(scenario, expected
 def test_invalid_binary_mask_contract_is_loud(mask, message):
     with pytest.raises(DetectionInputError, match=message):
         measure_coverage(mask)
+
+
+# ── blob (docs/DESIGN.md 6.1) ────────────────────────────────────────────
+
+def _blob_rule(**params: float) -> Rule:
+    return Rule("blob", tuple(sorted(params.items())))
+
+
+def test_blob_measures_the_shapes_of_docs_design_6_1():
+    # 6.1 이 문구로만 정한 값을 수치로 고정한다. 3x3 정사각은 circularity 원값이
+    # 1.767 이라 클램프가 없으면 1 을 넘고, contourArea 를 hull 로 쓰면
+    # solidity 가 9/4 = 2.25 가 된다. 20x5 는 AR 이 정확히 4.0 이어야 한다.
+    foreground = np.zeros((40, 40), dtype=np.uint8)
+    foreground[2:5, 2:5] = 1          # 3x3 정사각
+    foreground[10:30, 10:15] = 1      # 20x5 직사각
+    mask = _mask(foreground)
+
+    square, rectangle = sorted(measure_blobs(mask), key=lambda b: b.pixels)
+
+    assert (square.pixels, rectangle.pixels) == (9, 100)
+    assert square.circularity == 1.0            # 원값 1.767 -> 클램프
+    assert square.solidity == 1.0               # contourArea 였다면 2.25
+    assert square.aspect_ratio == 1.0
+    assert rectangle.aspect_ratio == pytest.approx(4.0)
+    assert rectangle.solidity == 1.0
+
+
+def test_blob_handles_components_too_thin_for_minarearect():
+    # minAreaRect 는 1픽셀에 (0,0), 1x10 선분에 (0,9) 를 준다. 장변/단변을 그대로
+    # 쓰면 nan / inf 가 되어 "AR 은 항상 >=1" 이 깨진다. 픽셀 폭(+1)으로 읽는다.
+    foreground = np.zeros((30, 30), dtype=np.uint8)
+    foreground[2, 2] = 1              # 1픽셀 (외곽 둘레 0 -> circularity 정의 불가)
+    foreground[10, 5:15] = 1          # 1x10 수평선
+    mask = _mask(foreground)
+
+    dot, line = sorted(measure_blobs(mask), key=lambda b: b.pixels)
+
+    assert dot.aspect_ratio == 1.0
+    assert dot.circularity == 1.0
+    assert dot.solidity == 1.0
+    assert line.aspect_ratio == pytest.approx(10.0)
+    assert all(np.isfinite(b.aspect_ratio) for b in (dot, line))
+
+
+def test_blob_solidity_drops_below_one_for_a_hollow_coating():
+    # 6.1: 분자가 구멍을 제외하므로 속이 빈 도포는 1 미만이어야 한다.
+    hollow = np.zeros((60, 60), dtype=np.uint8)
+    cv2.circle(hollow, (30, 30), 20, 1, -1)
+    cv2.circle(hollow, (30, 30), 10, 0, -1)
+    filled = np.zeros((60, 60), dtype=np.uint8)
+    cv2.circle(filled, (30, 30), 20, 1, -1)
+
+    (hollow_blob,) = measure_blobs(_mask(hollow))
+    (filled_blob,) = measure_blobs(_mask(filled))
+
+    assert hollow_blob.solidity < 0.8 < filled_blob.solidity <= 1.0
+
+
+def test_blob_area_denominator_is_the_roi_mask_not_its_bounding_box():
+    # 6.1 / L4: 분모는 사상된 실제 ROI 마스크 픽셀 수다. 회전 ROI 에서 마스크
+    # 픽셀 수와 bbox 넓이가 어긋나므로 둘 중 무엇을 썼는지 값이 갈린다.
+    roi = make_roi_mask(
+        (0.25, 0.25, 0.5, 0.5), Pose(tx=0.0, ty=0.0, theta_deg=30.0), (200, 200)
+    )
+    roi_pixels = int(np.count_nonzero(roi))
+    ys, xs = np.nonzero(roi)
+    bbox_area = (ys.max() - ys.min() + 1) * (xs.max() - xs.min() + 1)
+    assert roi_pixels != bbox_area, "이 회귀는 두 분모가 달라야 성립한다"
+
+    foreground = np.zeros((200, 200), dtype=np.uint8)
+    foreground[95:105, 95:105] = 255
+    foreground = cv2.bitwise_and(foreground, roi)
+    (blob,) = measure_blobs(DetectionMask(foreground, roi))
+
+    assert blob.area == pytest.approx(blob.pixels / roi_pixels)
+    assert blob.area != pytest.approx(blob.pixels / bbox_area)
+
+
+def test_blob_counts_diagonal_contact_as_one_component():
+    # 6.1: coverage 와 동일한 8-연결 기준. 4-연결이면 2개로 세어진다.
+    foreground = np.zeros((10, 10), dtype=np.uint8)
+    foreground[2, 2] = 1
+    foreground[3, 3] = 1
+
+    assert len(measure_blobs(_mask(foreground))) == 1
+
+
+def test_blob_empty_foreground_measures_zero_components():
+    # 6.1: 성분 0개는 결측이 아니라 실측값. coverage 의 continuity=None 과 다르다.
+    assert measure_blobs(_mask(np.zeros((10, 10), dtype=np.uint8))) == ()
+
+
+def test_blob_measures_a_component_touching_the_image_border():
+    # 측정은 성분 bbox 로 크롭해 수행한다. 프레임 가장자리에 붙은 성분에서
+    # 크롭이 외곽선을 잘라먹으면 값이 조용히 틀어진다.
+    edge = np.zeros((40, 40), dtype=np.uint8)
+    edge[0:3, 0:3] = 1
+    interior = np.zeros((40, 40), dtype=np.uint8)
+    interior[10:13, 10:13] = 1
+
+    (at_edge,) = measure_blobs(_mask(edge))
+    (inside,) = measure_blobs(_mask(interior))
+
+    assert (at_edge.pixels, at_edge.solidity, at_edge.aspect_ratio) == (
+        inside.pixels,
+        inside.solidity,
+        inside.aspect_ratio,
+    )
+
+
+def test_blob_filters_remove_before_counting():
+    # 6.1 의 순서 계약: 측정 -> 실제 제거 -> 통과분만 개수 판정.
+    # 원본 3개 중 작은 2개가 area_min 에 걸려 사라지고 1개만 세어진다.
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[5:8, 5:8] = 1        # 9px
+    foreground[15:18, 15:18] = 1    # 9px
+    foreground[30:50, 30:50] = 1    # 400px
+    mask = _mask(foreground)
+    assert len(measure_blobs(mask)) == 3
+
+    # 9/3600 = 0.0025, 400/3600 = 0.111
+    result = evaluate_blob(mask, _blob_rule(count_min=1, count_max=1, area_min=0.01))
+
+    assert len(result.kept) == 1
+    assert len(result.rejected) == 2
+    assert result.passed
+    # 제거가 없었다면 3 > count_max=1 로 실패했어야 한다.
+    assert not evaluate_blob(mask, _blob_rule(count_min=1, count_max=1)).passed
+
+
+def test_blob_rejection_carries_the_threshold_that_removed_it():
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[5:8, 5:8] = 1
+    mask = _mask(foreground)
+
+    result = evaluate_blob(mask, _blob_rule(count_min=0, count_max=5, area_min=0.01))
+
+    (rejection,) = result.rejected
+    assert rejection.param == "area_min"
+    assert rejection.operator == "<"
+    assert rejection.threshold == 0.01
+    assert rejection.measured == pytest.approx(9 / 3600)
+    assert rejection.blob.pixels == 9
+
+
+def test_blob_count_bounds_are_inclusive_and_report_the_failed_side():
+    foreground = np.zeros((40, 40), dtype=np.uint8)
+    foreground[5:10, 5:10] = 1
+    foreground[20:25, 20:25] = 1
+    mask = _mask(foreground)
+
+    assert evaluate_blob(mask, _blob_rule(count_min=2, count_max=2)).passed
+    assert evaluate_blob(mask, _blob_rule(count_min=3, count_max=5)).failed_params == (
+        "count_min",
+    )
+    assert evaluate_blob(mask, _blob_rule(count_min=0, count_max=1)).failed_params == (
+        "count_max",
+    )
+
+
+def test_blob_every_shape_parameter_is_wired_to_a_filter():
+    # VSGP 의 advisor->슬라이더 사고와 같은 계약. 스펙에만 있고 필터에 없는 키는
+    # 로드는 되는데 아무도 읽지 않는 죽은 파라미터가 된다(L1).
+    spec_keys = set(PARAM_SPECS["blob"]) - {"count_min", "count_max"}
+    filter_keys = {name for name, _field, _op in BLOB_FILTERS}
+    assert filter_keys == spec_keys
+
+    # 필드와 부등호는 파라미터 *이름*에서 유도한다. 표에서 읽어와 비교하면
+    # 표가 틀렸을 때 기대값도 같이 틀어져 아무것도 검사하지 못한다.
+    for name, field, operator in BLOB_FILTERS:
+        stem, _, bound = name.rpartition("_")
+        assert field == stem, f"{name}: {stem} 을 재야 하는데 {field} 를 읽는다"
+        assert operator == ("<" if bound == "min" else ">")
+        assert hasattr(BlobMeasurement(1, 0.1, 1.0, 1.0, 1.0), field)
+
+
+def test_blob_rejects_a_rule_from_another_tool():
+    with pytest.raises(DetectionInputError):
+        evaluate_blob(_mask(np.zeros((5, 5), dtype=np.uint8)), _rule(min=0.1))
+
+
+def test_every_blob_filter_flips_the_verdict_on_its_own_threshold():
+    # L1 감도 프로브: 필터 7종 각각이 실제로 blob 을 제거하고, 반대쪽으로 옮기면
+    # 남긴다. 한쪽만 확인하면 부등호가 뒤집혀도 통과한다 - area_min 만 쓰던
+    # 초안이 실제로 area_max 부등호 변이를 놓쳤다.
+    hollow = np.zeros((80, 80), dtype=np.uint8)
+    hollow[20:40, 15:65] = 1          # 50x20 -> AR 2.5
+    hollow[25:35, 25:55] = 0          # 속을 비워 solidity/circularity 를 1 미만으로
+    mask = _mask(hollow)
+    (blob,) = measure_blobs(mask)
+    assert blob.circularity < 1.0 and blob.solidity < 1.0 and blob.aspect_ratio > 1.0
+    assert 0.0 < blob.area < 1.0
+
+    for name, _field, _operator in BLOB_FILTERS:
+        # 방향도 이름에서 유도한다 - BLOB_FILTERS 의 부등호를 그대로 쓰면
+        # 부등호가 뒤집혔을 때 기대값이 함께 뒤집혀 통과해 버린다.
+        stem, _, bound = name.rpartition("_")
+        is_min = bound == "min"
+        measured = float(getattr(blob, stem))
+        removing = measured * (1.01 if is_min else 0.99)
+        keeping = measured * (0.99 if is_min else 1.01)
+
+        # count_min=1 이라 제거되면 판정 자체가 뒤집힌다. count_min=0 이면
+        # 제거 여부와 무관하게 양쪽 PASS 라 아무것도 검사하지 못한다.
+        removed = evaluate_blob(
+            mask, _blob_rule(count_min=1, count_max=1, **{name: removing})
+        )
+        kept = evaluate_blob(
+            mask, _blob_rule(count_min=1, count_max=1, **{name: keeping})
+        )
+        boundary = evaluate_blob(
+            mask, _blob_rule(count_min=1, count_max=1, **{name: measured})
+        )
+
+        assert removed.kept == (), f"{name}: 임계를 넘겼는데 제거되지 않았다"
+        assert [r.param for r in removed.rejected] == [name]
+        assert removed.rejected[0].operator == ("<" if is_min else ">")
+        assert not removed.passed, f"{name}: 제거됐는데 판정이 그대로 PASS 다"
+        assert removed.failed_params == ("count_min",)
+
+        assert kept.rejected == (), f"{name}: 통과해야 할 쪽에서 제거됐다"
+        assert kept.kept == (blob,)
+        assert kept.passed
+
+        # 임계 == 실측은 통과다. <= / >= 로 바뀌면 여기서 깨진다.
+        assert boundary.rejected == (), f"{name}: 경계값이 배타적으로 처리됐다"
+        assert boundary.passed
+
+
+def test_rejection_records_the_first_violated_threshold_not_the_last():
+    # BLOB_FILTERS 순서 계약. 한 blob 이 두 임계를 동시에 위반할 때 앞선 것이
+    # 기록돼야 한다 - 하나만 위반시키면 마지막 위반 반환으로 바꿔도 통과한다.
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[5, 5:15] = 1          # 1x10 선분: area 작고 circularity 도 낮다
+    mask = _mask(foreground)
+    (blob,) = measure_blobs(mask)
+    assert blob.area < 0.01 and blob.circularity < 0.5
+
+    result = evaluate_blob(
+        mask,
+        _blob_rule(count_min=0, count_max=9, area_min=0.01, circularity_min=0.5),
+    )
+
+    (rejection,) = result.rejected
+    order = [name for name, _f, _o in BLOB_FILTERS]
+    assert order.index("area_min") < order.index("circularity_min")
+    assert rejection.param == "area_min", "표에서 앞선 임계가 기록돼야 한다"
+
+
+def test_aspect_ratio_does_not_change_with_orientation():
+    # 같은 물체를 돌린 것뿐인데 AR 이 달라지면 방향만으로 판정이 뒤집힌다.
+    # 방향 검사는 6.1 이 shape_compare 에 맡긴 몫이고 blob 은 "가늘고 김"만 잰다.
+    # 픽셀 중심만 쓰면 대각선이 13.73, 수평이 10.0 이었다.
+    horizontal = np.zeros((40, 40), dtype=np.uint8)
+    horizontal[10, 5:15] = 1
+    vertical = np.zeros((40, 40), dtype=np.uint8)
+    vertical[5:15, 10] = 1
+    diagonal = np.zeros((40, 40), dtype=np.uint8)
+    for i in range(10):
+        diagonal[5 + i, 5 + i] = 1
+
+    ars = [measure_blobs(_mask(m))[0].aspect_ratio for m in (horizontal, vertical, diagonal)]
+
+    assert all(a == pytest.approx(10.0) for a in ars), ars
+    # 같은 규칙에서 세 방향의 판정이 모두 같아야 한다.
+    rule = _blob_rule(count_min=1, count_max=1, aspect_ratio_max=11.0)
+    verdicts = [
+        evaluate_blob(_mask(m), rule).passed for m in (horizontal, vertical, diagonal)
+    ]
+    assert verdicts == [True, True, True], verdicts
