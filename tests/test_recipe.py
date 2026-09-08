@@ -812,6 +812,18 @@ def test_nesting_within_the_depth_limit_still_validates_normally():
     parse_recipe(d)
 
 
+def test_depth_limit_is_a_deliberate_compatibility_break_not_a_closed_defect():
+    # 깊이 100~331 은 base(327dc1e) 에서 정상 로드되던 입력이다 - RecursionError 로
+    # 터지기 시작하는 지점은 332 다. 즉 이 구간의 거부는 "탈출하던 결함을 닫은 것"이
+    # 아니라 의도한 호환성 축소다. 한계를 332 근처로 올리면 재귀 한계와의 여유가
+    # 사라지므로 100 을 유지하되, 그 성격을 여기에 명시한다.
+    for depth in (110, 200, 331):
+        d = _sample_dict()
+        d["rois"][0]["detect"]["_note"] = _nested(depth)
+        with pytest.raises(RecipeError, match="중첩이 너무 깊음"):
+            parse_recipe(d)
+
+
 def test_deeply_nested_file_reports_recipe_error(tmp_path):
     # json.loads 자체가 깊이 994 근처에서 RecursionError 를 낸다.
     # load_recipe 의 except 가 그것도 감싸야 파일 경로 계약이 닫힌다.

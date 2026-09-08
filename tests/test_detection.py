@@ -627,3 +627,29 @@ def test_aspect_ratio_does_not_change_with_orientation():
         evaluate_blob(_mask(m), rule).passed for m in (horizontal, vertical, diagonal)
     ]
     assert verdicts == [True, True, True], verdicts
+
+
+def test_circularity_uses_the_isoperimetric_constant():
+    # 4pi 를 실제로 고정한다. 기존 테스트는 3x3 정사각이 클램프에 걸려 1.0 이고
+    # 1x10 선분은 "< 0.5" 로만 봐서, 상수를 3pi 나 5pi 로 바꿔도 전부 통과했다.
+    # 20x5 직사각은 클램프에 닿지 않아 상수가 값에 그대로 드러난다.
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[10:30, 10:15] = 1          # px=100, 외곽 둘레=46
+    (blob,) = measure_blobs(_mask(foreground))
+
+    assert blob.pixels == 100
+    assert blob.circularity == pytest.approx(0.593874, abs=1e-6)   # 3pi=0.445405, 5pi=0.742342
+
+
+def test_wrong_circularity_constant_flips_the_verdict():
+    # 숫자만 고정하면 상수가 판정까지 바꾼다는 것을 놓친다. 임계를 4pi 값 양옆에
+    # 두면 3pi(작아짐)와 5pi(커짐) 어느 쪽으로 틀어져도 blob 이 제거돼 FAIL 이 된다.
+    foreground = np.zeros((60, 60), dtype=np.uint8)
+    foreground[10:30, 10:15] = 1
+    mask = _mask(foreground)
+    rule = _blob_rule(count_min=1, count_max=1, circularity_min=0.50, circularity_max=0.65)
+
+    result = evaluate_blob(mask, rule)
+
+    assert result.kept and result.passed          # 4pi = 0.5939 는 구간 안
+    assert result.rejected == ()
