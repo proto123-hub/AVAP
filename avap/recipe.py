@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -70,7 +71,7 @@ PARAM_SPECS: dict[str, dict[str, tuple[str, float | None, float | None, bool]]] 
         "circularity_min": ("frac", 0.0, 1.0, False),
         "circularity_max": ("frac", 0.0, 1.0, False),
         "solidity_min": ("frac", 0.0, 1.0, False),
-        "aspect_ratio_min": ("float", 0.0, 100.0, False),
+        "aspect_ratio_min": ("float", 1.0, 100.0, False),
         "aspect_ratio_max": ("float", 0.0, 100.0, False),
     },
     "coverage": {
@@ -215,6 +216,19 @@ def _check_unknown_keys(errors: list[str], where: str, block: Any, allowed_id: s
             )
 
 
+def _is_finite_number(value: Any) -> bool:
+    """True only for a real, finite number; bool and non-numbers are excluded.
+
+    A Python int is always finite, and ``math.isfinite`` would first convert one
+    to a float - raising OverflowError past ~1e308 - so ints short-circuit before
+    the check.  Every numeric field routes through here precisely so that no path
+    can end up guarded while another is not.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return isinstance(value, int) or math.isfinite(value)
+
+
 def _check_frac(errors: list[str], where: str, value: Any, hi: float = 1.0) -> None:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or not (0.0 < value <= hi):
         errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) - {value!r}")
@@ -232,18 +246,26 @@ def _immutable(v: Any) -> Any:
     return v
 
 
-def _check_rect(errors: list[str], where: str, rect: Any) -> None:
+def _check_rect(errors: list[str], where: str, rect: Any) -> bool:
+    """Validate one [x, y, w, h] rect; return whether it came out usable.
+
+    Callers that go on to do arithmetic across two rects need the answer, not
+    just the recorded error: comparing an out-of-range value is not merely
+    pointless, it raises - a huge int against a float bound overflows.
+    """
     if (not isinstance(rect, list)) or len(rect) != 4 or not all(
-        isinstance(v, (int, float)) and not isinstance(v, bool)
-        and math.isfinite(v) for v in rect
+        _is_finite_number(v) for v in rect
     ):
         errors.append(f"{where}: [x, y, w, h] 4개 숫자여야 함 - {rect!r}")
-        return
+        return False
     x, y, w, h = rect
     if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and 0.0 < w <= 1.0 and 0.0 < h <= 1.0):
         errors.append(f"{where}: 좌표는 0~1 분수여야 함 (L7) - {rect!r}")
-    elif x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
+        return False
+    if x + w > 1.0 + 1e-9 or y + h > 1.0 + 1e-9:
         errors.append(f"{where}: 사각형이 골든 프레임을 벗어남 - {rect!r}")
+        return False
+    return True
 
 
 def _check_params(errors: list[str], where: str, tool: str, params: dict) -> None:
@@ -253,6 +275,10 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             f"{where}: 알 수 없는 tool '{tool}' (허용: {', '.join(sorted(PARAM_SPECS))})"
         )
         return
+    # Only keys that clear every check of their own are comparable to a partner
+    # below; pairing a value that is not a number would raise TypeError instead
+    # of adding to `errors`.
+    numeric: set[str] = set()
     for key, value in params.items():
         if key not in spec:
             errors.append(
@@ -267,17 +293,68 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             ):
                 errors.append(f"{where}.{key}: [h, s, v] 각 0~1 이어야 함 - {value!r}")
             continue
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            errors.append(f"{where}.{key}: 숫자여야 함 - {value!r}")
+        if not _is_finite_number(value):
+            # json.loads accepts NaN/Infinity, and int() raises on both, so this
+            # must reject before any conversion - not after a range comparison,
+            # since every comparison against NaN is False.
+            errors.append(f"{where}.{key}: 유한한 수여야 함 - {value!r}")
             continue
+        ok = True
         if kind == "int" and int(value) != value:
             errors.append(f"{where}.{key}: 정수여야 함 - {value!r}")
+            ok = False
         if lo is not None and hi is not None and not (lo <= value <= hi):
             unit = " (0~1 분수, L7)" if kind == "frac" else ""
             errors.append(f"{where}.{key}: 범위 [{lo}, {hi}] 밖{unit} - {value!r}")
+            ok = False
+        if ok:
+            numeric.add(key)
     for key, (_kind, _lo, _hi, required) in spec.items():
         if required and key not in params:
             errors.append(f"{where}: tool '{tool}'의 필수 파라미터 '{key}' 누락")
+    _check_min_max_pairs(errors, where, spec, params, numeric)
+
+
+def _min_max_pairs(spec: dict) -> tuple[tuple[str, str], ...]:
+    """Pair each lower bound in a spec with its upper bound, by name.
+
+    The scan is min-driven: a lower bound is recognised by suffix - bare ``min``
+    or ``*_min`` - and its partner is that name with ``min`` replaced by ``max``.
+    ``max_dist`` is therefore never a candidate at all, being neither; that it
+    also survives substring matching is incidental.  Suffix rather than substring
+    matching is a guard on future names - on today's PARAM_SPECS the two rules
+    select the same eight keys, so nothing observable turns on it.
+
+    A min whose max is absent from the spec - ``solidity_min``, ``continuity_min``,
+    ``iou_min`` - has no partner and so nothing to contradict.
+    """
+    pairs = []
+    for key in spec:
+        if key != "min" and not key.endswith("_min"):
+            continue
+        partner = key[: -len("min")] + "max"
+        if partner in spec:
+            pairs.append((key, partner))
+    return tuple(pairs)
+
+
+def _check_min_max_pairs(
+    errors: list[str], where: str, spec: dict, params: dict, numeric: set[str]
+) -> None:
+    """Reject a min above its paired max - a range nothing can ever satisfy.
+
+    Only keys in ``numeric`` are compared.  A value that already failed its own
+    type or range check has an error recorded for it, and comparing it here
+    would raise TypeError out of the loader instead.
+    """
+    for key, partner in _min_max_pairs(spec):
+        if key not in numeric or partner not in numeric:
+            continue
+        if params[key] > params[partner]:
+            errors.append(
+                f"{where}: {key}({params[key]}) > {partner}({params[partner]}) - "
+                f"어떤 측정값도 통과할 수 없는 구간"
+            )
 
 
 def compute_fingerprint(data: dict) -> str:
@@ -297,14 +374,87 @@ def load_recipe(path: str | Path) -> Recipe:
     p = Path(path)
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as e:
-        raise RecipeError(f"recipe 읽기 실패: {p} - {e}") from e
+    except (OSError, ValueError, RecursionError) as e:
+        # ValueError covers json.JSONDecodeError and the int-literal length limit
+        # CPython enforces while parsing (sys.get_int_max_str_digits);
+        # RecursionError covers a deeply nested document, which json.loads parses
+        # recursively and gives up on around depth 994.
+        raise RecipeError(f"recipe 읽기 실패: {p} - {type(e).__name__}") from e
     return parse_recipe(data)
+
+
+# Deep enough for any real recipe (the sample nests 6 levels) and far below the
+# depth at which the recursive walkers below - _freeze, json.dumps - blow the
+# stack, measured at 332.
+_MAX_JSON_DEPTH = 100
+
+
+def _reject_unrepresentable(data: Any) -> None:
+    """Reject input the loader cannot even describe, before validation starts.
+
+    Validation reports problems by rendering values into messages, and computes
+    the fingerprint by serialising the whole document.  Input that defeats
+    either escapes as some foreign exception rather than RecipeError, so it is
+    refused here once, for the document as a whole:
+
+    * an int past ``sys.get_int_max_str_digits()`` - ``str()`` raises
+    * a string holding a lone surrogate - ``encode("utf-8")`` raises, and a JSON
+      file can carry one as a plain ASCII ``\\udNNN`` escape
+    * a non-string dict key - ``key.startswith()`` and ``sort_keys=True`` raise
+    * a value outside the JSON types (set, bytes, Decimal) - ``json.dumps`` raises
+    * nesting past ``_MAX_JSON_DEPTH`` - the recursive walkers hit RecursionError
+
+    Reported without rendering the offending value, since rendering is exactly
+    what fails.
+    """
+    stack: list[tuple[Any, int]] = [(data, 0)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > _MAX_JSON_DEPTH:
+            raise RecipeError(
+                f"중첩이 너무 깊음: {_MAX_JSON_DEPTH}단계를 넘는 구조는 검증할 수 없다"
+            )
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if not isinstance(key, str):
+                    raise RecipeError(
+                        f"JSON 객체의 키는 문자열이어야 함 - {type(key).__name__}"
+                    )
+                _reject_untextable(key, "키")
+                stack.append((value, depth + 1))
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                stack.append((item, depth + 1))
+        elif isinstance(node, str):
+            _reject_untextable(node, "문자열")
+        elif isinstance(node, bool) or node is None or isinstance(node, float):
+            continue
+        elif isinstance(node, int):
+            try:
+                str(node)
+            except ValueError:
+                raise RecipeError(
+                    f"정수가 너무 커 문자열로 표현할 수 없음: {node.bit_length()}비트 "
+                    f"(한계 {sys.get_int_max_str_digits()}자리)"
+                ) from None
+        else:
+            raise RecipeError(f"JSON 값이 아님: {type(node).__name__}")
+
+
+def _reject_untextable(text: str, what: str) -> None:
+    """Reject a string that cannot be encoded as UTF-8 (a lone surrogate)."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as e:
+        raise RecipeError(
+            f"UTF-8 로 인코딩할 수 없는 {what} - {e.reason} (위치 {e.start})"
+        ) from None
 
 
 def parse_recipe(data: dict) -> Recipe:
     if not isinstance(data, dict):
         raise RecipeError(f"recipe 루트는 JSON 객체여야 함 - {type(data).__name__}")
+    _reject_unrepresentable(data)
     errors: list[str] = []
 
     _check_unknown_keys(errors, "", data, "")
@@ -367,18 +517,17 @@ def parse_recipe(data: dict) -> Recipe:
         for k in ("id", "origin", "search"):
             if k not in a:
                 errors.append(f"{where}: '{k}' 누락")
-        _check_rect(errors, f"{where}.origin", a.get("origin", []))
-        _check_rect(errors, f"{where}.search", a.get("search", []))
+        origin_ok = _check_rect(errors, f"{where}.origin", a.get("origin", []))
+        search_ok = _check_rect(errors, f"{where}.search", a.get("search", []))
         anchor_id = a.get("id")
         if not isinstance(anchor_id, str) or not anchor_id.strip():
             errors.append(f"{where}.id: 비어 있지 않은 문자열이어야 함 - {anchor_id!r}")
         else:
             anchor_ids.append(anchor_id)
-        origin, search = a.get("origin"), a.get("search")
-        if (isinstance(origin, list) and len(origin) == 4
-                and isinstance(search, list) and len(search) == 4
-                and all(isinstance(v, (int, float)) and not isinstance(v, bool)
-                        and math.isfinite(v) for v in origin + search)):
+        # Containment only means anything for two rects that already validated;
+        # comparing an out-of-range value would overflow before it could fail.
+        if origin_ok and search_ok:
+            origin, search = a["origin"], a["search"]
             ox, oy, ow, oh = origin
             sx, sy, sw, sh = search
             if (ox < sx - 1e-9 or oy < sy - 1e-9
@@ -386,8 +535,7 @@ def parse_recipe(data: dict) -> Recipe:
                     or oy + oh > sy + sh + 1e-9):
                 errors.append(f"{where}.search: origin 전체를 포함해야 함")
         score = a.get("min_score", 0.7)
-        if (not isinstance(score, (int, float)) or isinstance(score, bool)
-                or not math.isfinite(score) or not (0.0 < score <= 1.0)):
+        if not _is_finite_number(score) or not (0.0 < score <= 1.0):
             errors.append(f"{where}.min_score: 0~1 이어야 함 - {score!r}")
         if not errors:
             anchors.append(
@@ -414,9 +562,7 @@ def parse_recipe(data: dict) -> Recipe:
     _check_frac(errors, "pose_gates.max_shift_frac", gates.get("max_shift_frac", 0.05))
     _check_frac(errors, "pose_gates.scale_tol", gates.get("scale_tol", 0.02))
     max_rot = gates.get("max_rotation_deg", 3.0)
-    if (not isinstance(max_rot, (int, float)) or isinstance(max_rot, bool)
-            or not math.isfinite(max_rot)
-            or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT)):
+    if not _is_finite_number(max_rot) or not (0.0 < max_rot <= MAX_ROTATION_DEG_LIMIT):
         errors.append(
             f"pose_gates.max_rotation_deg: 0~{MAX_ROTATION_DEG_LIMIT} 이어야 함 - {max_rot!r}"
         )
@@ -431,7 +577,7 @@ def parse_recipe(data: dict) -> Recipe:
         r = _dict_of(errors, where, r)
         roi_id = r.get("id") or f"roi_{i}"
         _check_unknown_keys(errors, where, r, "rois[]")
-        _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
+        rect_ok = _check_rect(errors, f"{where}.rect_golden", r.get("rect_golden", []))
         detect = _dict_of(errors, f"{where}.detect", r.get("detect", _MISSING))
         _check_unknown_keys(errors, f"{where}.detect", detect, "rois[].detect")
         if detect.get("space", "hsv") != "hsv":
@@ -484,13 +630,21 @@ def parse_recipe(data: dict) -> Recipe:
             if tool is None:
                 errors.append(f"{rwhere}: 'tool' 누락")
                 continue
+            if not isinstance(tool, str):
+                # PARAM_SPECS.get(tool) below needs a hashable key: a list or
+                # dict here raises TypeError instead of recording an error.
+                errors.append(f"{rwhere}.tool: 문자열이어야 함 - {tool!r}")
+                continue
             _check_params(errors, rwhere, tool, params)
             rules.append(Rule(tool=str(tool), params=_freeze(params)))
         rois.append(
             Roi(
                 id=str(roi_id),
                 label=str(r.get("label", roi_id)),
-                rect_golden=tuple(r.get("rect_golden", (0, 0, 1, 1))),
+                # A rect that failed validation is not iterable in general
+                # (null / true / 7 all reach here); the placeholder never leaves
+                # this function because `errors` is non-empty and raises below.
+                rect_golden=tuple(r["rect_golden"]) if rect_ok else (0.0, 0.0, 1.0, 1.0),
                 detect=_freeze(detect),
                 rules=tuple(rules),
             )
