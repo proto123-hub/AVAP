@@ -105,7 +105,7 @@ v1 감량: 피라미드는 실측된 좁은 탐색창에서 이득 없이 계약
 |---|---|
 | blob | 측정 → **실제 필터**(통과분만 셈) → 개수 min~max. 제거 blob마다 사유(실측 vs 임계) Evidence |
 | coverage | ROI 내 마스크 비율(0~1) + continuity(최대 연결성분 — 끊김 검출) + required/forbidden 존(기대 위치 미도포 / 금지 영역 도포) |
-| color_stats | 도포부 평균 HSV vs 기대 중심·허용 거리 — 오재질·변색을 '미도포'와 구분 (HSV 마스크만으로는 둘 다 빈 마스크로 보임) |
+| color_stats | 골든 footprint `G` 안 원본 색의 픽셀별 거리 RMS vs 기대 중심·허용 거리(§6.2) — 오재질·변색의 증거를 남긴다 (HSV 마스크만으로는 오재질과 미도포가 둘 다 빈 마스크로 보임) |
 | shape_compare | 골든 도포 footprint와 현재 마스크 대조(초과·부족·IoU) — 정렬이 있어야 가능한 가장 직접적인 도포 형태 검사 |
 
 ### 6.1 blob 측정 정의 (구현 전 확정 — 재해석 금지)
@@ -189,6 +189,16 @@ coverage 도구와 맞물리는 두 지점 — **동일한 ROI 마스크**, **�
 
 **이 도구가 확정하는 것과 못 하는 것.** 색상 불일치의 증거를 제공한다. 동일한 관측색을
 만드는 미도포와 오재질의 **원인까지 단독으로 확정하지는 못한다.**
+
+**위 정의가 정하지 않은 것은 구현에서 확정했다.** `tests/test_color_stats.py`가 고정한다.
+
+| 케이스 | 확정 | 근거 |
+|---|---|---|
+| 골든에 도포가 없음 (`G0` 빔) | `golden_footprint`가 `DetectionInputError` | 레시피·골든이 도포를 기술하지 않는 설정 오류다. 빈 `G0`를 돌려주면 판정 시점까지 원인이 숨는다 |
+| 사상 후 `G`가 빔 | `measure_color_stats`가 `DetectionInputError` | 측정 불능이다. §6.3과 같이 PASS로 취급하지 않는다 |
+| pose 규약 | 사상 행렬을 `transform_points`에서 직접 읽는다 | 회전 공식을 한 번 더 쓰면 `G`와 ROI 폴리곤이 다른 규약을 따를 수 있다 |
+| 판정 경계 | `D == max_dist`는 PASS, 실패 시 `failed_params == ("max_dist",)` | coverage·blob과 같은 포함 경계. `expect_hsv_center`는 임계가 아니라 기준점이다 |
+| `[h, s, v]` 입력의 bool | 로더(`RecipeError`)와 API(`DetectionInputError`) 모두 거부 | `bool`이 `int`의 하위 타입이라 `True`/`False`가 1.0/0.0으로 통과했다(#11). `detect.lower/upper`도 같은 검사를 공유한다 |
 
 ### 6.3 shape_compare 측정 정의 (구현 전 확정 — 재해석 금지)
 
