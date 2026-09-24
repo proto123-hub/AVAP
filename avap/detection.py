@@ -92,6 +92,25 @@ class ColorStatsResult:
     failed_params: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ShapeCompareMeasurement:
+    """Overlap of the current foreground C with the golden footprint G."""
+
+    iou: float
+    excess: float
+    deficit: float
+    footprint_pixels: int
+    foreground_pixels: int
+    intersection_pixels: int
+
+
+@dataclass(frozen=True)
+class ShapeCompareResult:
+    measurement: ShapeCompareMeasurement
+    passed: bool
+    failed_params: tuple[str, ...]
+
+
 # Shape thresholds that remove a blob, in the order they are tested.  Every
 # non-count key of PARAM_SPECS["blob"] must appear here or it would load fine
 # and then never be read - a dead parameter (L1).  A test enforces both
@@ -635,3 +654,62 @@ def evaluate_color_stats(
     measurement = measure_color_stats(image_bgr, footprint, params["expect_hsv_center"])
     failed = ("max_dist",) if measurement.distance > float(params["max_dist"]) else ()
     return ColorStatsResult(measurement, not failed, failed)
+
+
+# ── shape_compare (docs/DESIGN.md 6.3) ───────────────────────────────────
+
+def measure_shape_compare(mask: DetectionMask, footprint: np.ndarray) -> ShapeCompareMeasurement:
+    """IoU = |G & C| / |G | C|, excess = |C \\ G| / |C|, deficit = |G \\ C| / |G|.
+
+    C is the current foreground and G the golden footprint already carried
+    into the frame (map_footprint), so both are compared in frame
+    coordinates.  G must lie inside the same ROI as C: an uncut G0 would count
+    golden pixels the frame never inspects as missing.  An empty G is a
+    comparison that could not be made, not an IoU of 1 or a PASS.  A valid G
+    with an empty C measures (0, 0, 1); excess is 0 because nothing was
+    applied outside G.
+    """
+    roi, foreground = _validated_pair(mask)
+    golden = _binary_mask(footprint, "footprint", roi.shape) != 0
+    if not np.any(golden):
+        raise DetectionInputError(
+            "footprint G: empty - shape cannot be compared, and an unmeasured shape is not a PASS"
+        )
+    if np.any(golden & (roi == 0)):
+        raise DetectionInputError(
+            "footprint G: pixels outside ROI are forbidden - cut it to the ROI (map_footprint)"
+        )
+    current = foreground != 0
+    footprint_pixels = int(np.count_nonzero(golden))
+    foreground_pixels = int(np.count_nonzero(current))
+    both = int(np.count_nonzero(golden & current))
+    union = footprint_pixels + foreground_pixels - both
+    return ShapeCompareMeasurement(
+        iou=both / union,
+        excess=(foreground_pixels - both) / foreground_pixels if foreground_pixels else 0.0,
+        deficit=(footprint_pixels - both) / footprint_pixels,
+        footprint_pixels=footprint_pixels,
+        foreground_pixels=foreground_pixels,
+        intersection_pixels=both,
+    )
+
+
+def evaluate_shape_compare(
+    mask: DetectionMask,
+    footprint: np.ndarray,
+    rule: Rule,
+) -> ShapeCompareResult:
+    """Evaluate one loaded shape_compare rule with inclusive threshold boundaries."""
+    if not isinstance(rule, Rule) or rule.tool != "shape_compare":
+        actual = getattr(rule, "tool", None)
+        raise DetectionInputError(f"rule: shape_compare Rule required - {actual!r}")
+    params = dict(rule.params)
+    measurement = measure_shape_compare(mask, footprint)
+    failed: list[str] = []
+    if measurement.iou < float(params["iou_min"]):
+        failed.append("iou_min")
+    if "excess_max" in params and measurement.excess > float(params["excess_max"]):
+        failed.append("excess_max")
+    if "deficit_max" in params and measurement.deficit > float(params["deficit_max"]):
+        failed.append("deficit_max")
+    return ShapeCompareResult(measurement, not failed, tuple(failed))
