@@ -10,6 +10,13 @@ RECIPE_SCHEMA_VERSION = "1.1"
 # OpenCV HSV channel maxima used to quantize normalized recipe bounds.
 HSV_CHANNEL_SCALES = (179.0, 255.0, 255.0)
 
+# Period of OpenCV's 8-bit hue (0..179 covers one full turn in 2-degree steps).
+# color_stats reads measured hue on this period so that H=0 and H=179 are
+# neighbours (docs/DESIGN.md 6.2). The 179 in HSV_CHANNEL_SCALES is a different
+# thing - the largest representable value used to quantize detect bounds - and
+# is deliberately left unchanged.
+OPENCV_HUE_PERIOD = 180.0
+
 # Setting-change severity thresholds (fractions, shared by advisor & change log).
 NOTICE_CHANGE_FRAC = 0.15
 LARGE_CHANGE_FRAC = 0.30

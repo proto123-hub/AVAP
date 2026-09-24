@@ -234,6 +234,18 @@ def _check_frac(errors: list[str], where: str, value: Any, hi: float = 1.0) -> N
         errors.append(f"{where}: (0, {hi}] 범위 분수여야 함 (L7) - {value!r}")
 
 
+def _is_unit_hsv(value: Any) -> bool:
+    """True only for a list of exactly three finite, non-bool numbers in 0..1.
+
+    Shared by every [h, s, v] field (detect bounds and color_stats centre) so the
+    bool check cannot be present on one and missing on another - that asymmetry
+    is how True/False were accepted as 1.0/0.0 (issue #11).
+    """
+    return isinstance(value, list) and len(value) == 3 and all(
+        _is_finite_number(v) and 0.0 <= v <= 1.0 for v in value
+    )
+
+
 def _freeze(d: dict) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted((k, _immutable(v)) for k, v in d.items()))
 
@@ -288,9 +300,7 @@ def _check_params(errors: list[str], where: str, tool: str, params: dict) -> Non
             continue
         kind, lo, hi, _req = spec[key]
         if kind == "hsv":
-            if (not isinstance(value, list)) or len(value) != 3 or not all(
-                isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in value
-            ):
+            if not _is_unit_hsv(value):
                 errors.append(f"{where}.{key}: [h, s, v] 각 0~1 이어야 함 - {value!r}")
             continue
         if not _is_finite_number(value):
@@ -599,9 +609,7 @@ def parse_recipe(data: dict) -> Recipe:
         hsv_bounds = {}
         for bound in ("lower", "upper"):
             v = detect.get(bound)
-            if (not isinstance(v, list)) or len(v) != 3 or not all(
-                isinstance(x, (int, float)) and 0.0 <= x <= 1.0 for x in v
-            ):
+            if not _is_unit_hsv(v):
                 errors.append(f"{where}.detect.{bound}: [h, s, v] 각 0~1 이어야 함 (L7) - {v!r}")
             else:
                 hsv_bounds[bound] = v

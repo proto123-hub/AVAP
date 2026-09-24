@@ -6,6 +6,7 @@ keeps the ROI denominator beside the resulting foreground mask.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +15,7 @@ import cv2
 import numpy as np
 
 from avap.alignment import Pose, transform_points
-from avap.constants import HSV_CHANNEL_SCALES
+from avap.constants import HSV_CHANNEL_SCALES, OPENCV_HUE_PERIOD
 from avap.recipe import Rule
 
 
@@ -76,6 +77,21 @@ class BlobResult:
     failed_params: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ColorStatsMeasurement:
+    """Colour distance of the original frame inside the golden footprint G."""
+
+    distance: float
+    footprint_pixels: int
+
+
+@dataclass(frozen=True)
+class ColorStatsResult:
+    measurement: ColorStatsMeasurement
+    passed: bool
+    failed_params: tuple[str, ...]
+
+
 # Shape thresholds that remove a blob, in the order they are tested.  Every
 # non-count key of PARAM_SPECS["blob"] must appear here or it would load fine
 # and then never be read - a dead parameter (L1).  A test enforces both
@@ -117,24 +133,42 @@ def _mapping(value: Any, name: str) -> Mapping[str, Any]:
         raise DetectionInputError(f"{name}: mapping required") from exc
 
 
+def _hsv_triple(value: Any, name: str) -> np.ndarray:
+    """Three finite, non-bool numbers in 0..1 - the one [h, s, v] check.
+
+    Every [h, s, v] input goes through here so the bool check cannot exist on
+    one and be missing on another (issue #11).  Elements are checked one by one
+    before any conversion: np.asarray silently turns [True, 0.5, 0.5] into
+    floats, and float() overflows on huge ints, whereas a chained comparison
+    rejects NaN, inf and huge ints alike.
+    """
+    if not isinstance(value, (list, tuple, np.ndarray)) or len(value) != 3:
+        raise DetectionInputError(f"{name}: three numeric 0..1 values required")
+    items = list(value)
+    if any(isinstance(item, (bool, np.bool_))
+           or not isinstance(item, (int, float, np.integer, np.floating))
+           for item in items):
+        raise DetectionInputError(f"{name}: three numeric 0..1 values required")
+    if not all(0 <= item <= 1 for item in items):
+        raise DetectionInputError(f"{name}: three finite 0..1 values required")
+    return np.array([float(item) for item in items], dtype=np.float64)
+
+
 def _hsv_bounds(detect: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray]:
-    raw_lower = np.asarray(detect.get("lower"))
-    raw_upper = np.asarray(detect.get("upper"))
-    if (raw_lower.shape != (3,) or raw_upper.shape != (3,)
-            or raw_lower.dtype == np.bool_ or raw_upper.dtype == np.bool_
-            or not np.issubdtype(raw_lower.dtype, np.number)
-            or not np.issubdtype(raw_upper.dtype, np.number)):
-        raise DetectionInputError("detect.lower/upper: three numeric 0..1 values required")
-    lower = raw_lower.astype(np.float64)
-    upper = raw_upper.astype(np.float64)
-    if (lower.shape != (3,) or upper.shape != (3,)
-            or not np.isfinite(lower).all() or not np.isfinite(upper).all()
-            or (lower < 0.0).any() or (lower > 1.0).any()
-            or (upper < 0.0).any() or (upper > 1.0).any()):
-        raise DetectionInputError("detect.lower/upper: three finite 0..1 values required")
+    lower = _hsv_triple(detect.get("lower"), "detect.lower/upper")
+    upper = _hsv_triple(detect.get("upper"), "detect.lower/upper")
     if (lower[1:] > upper[1:]).any():
         raise DetectionInputError("detect.lower: S/V cannot exceed detect.upper")
     return lower, upper
+
+
+def _validated_image(image_bgr: Any) -> np.ndarray:
+    if (not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3
+            or image_bgr.shape[2] != 3 or image_bgr.dtype != np.uint8
+            or image_bgr.shape[0] == 0 or image_bgr.shape[1] == 0):
+        actual = (getattr(image_bgr, "shape", None), getattr(image_bgr, "dtype", None))
+        raise DetectionInputError(f"image_bgr: non-empty HxWx3 uint8 required - {actual!r}")
+    return image_bgr
 
 
 def make_roi_mask(
@@ -204,13 +238,7 @@ def make_mask(
     foreground-inside-ROI invariant that CLOSE can break, because the bridge it
     draws between two fragments may run outside the ROI.
     """
-    if (not isinstance(image_bgr, np.ndarray) or image_bgr.ndim != 3
-            or image_bgr.shape[2] != 3 or image_bgr.dtype != np.uint8
-            or image_bgr.shape[0] == 0 or image_bgr.shape[1] == 0):
-        actual = (getattr(image_bgr, "shape", None), getattr(image_bgr, "dtype", None))
-        raise DetectionInputError(f"image_bgr: non-empty HxWx3 uint8 required - {actual!r}")
-
-    shape = image_bgr.shape[:2]
+    shape = _validated_image(image_bgr).shape[:2]
     roi = _binary_mask(roi_mask, "roi_mask", shape)
     if not np.any(roi):
         raise DetectionInputError("roi_mask: at least one ROI pixel required")
@@ -486,3 +514,124 @@ def evaluate_blob(mask: DetectionMask, rule: Rule) -> BlobResult:
     if count > int(params["count_max"]):
         failed.append("count_max")
     return BlobResult(tuple(kept), tuple(rejected), not failed, tuple(failed))
+
+
+# ── golden footprint G (docs/DESIGN.md 6.3) ──────────────────────────────
+
+# Three points whose images under a pose fix its affine matrix exactly.
+_AFFINE_BASIS = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+
+
+def golden_footprint(
+    golden_bgr: np.ndarray,
+    rect_golden: Sequence[float],
+    detect: Mapping[str, Any] | Sequence[tuple[str, Any]],
+) -> np.ndarray:
+    """G0: the reference coating in golden coordinates (docs/DESIGN.md 6.3).
+
+    It is the ordinary make_mask output for the golden snapshot the aligner
+    was built from, at the identity pose - no second detector.  It does not
+    depend on the inspected frame, so build it once per (recipe, golden, ROI):
+    it does depend on the ROI's rect_golden and detect block.
+    An empty G0 means the golden shows no material in this ROI: the recipe
+    and golden do not describe a coating, which is a configuration error.
+    """
+    height, width = _validated_image(golden_bgr).shape[:2]
+    roi = make_roi_mask(rect_golden, Pose(0.0, 0.0, 0.0), (width, height))
+    footprint = make_mask(golden_bgr, roi, detect).foreground
+    if not np.any(footprint):
+        raise DetectionInputError(
+            "golden footprint G0: empty - the golden image shows no material in this ROI"
+        )
+    return footprint
+
+
+def map_footprint(golden_mask: np.ndarray, pose: Pose, roi_mask: np.ndarray) -> np.ndarray:
+    """G: G0 carried golden -> frame by the alignment pose, then cut to the ROI.
+
+    The affine matrix is read off transform_points itself instead of being
+    rebuilt from a rotation formula, so the footprint and the ROI polygon
+    cannot disagree on the pose convention.  Nearest-neighbour keeps the mask
+    binary and pixels that map from outside the golden frame are 0.  The
+    result may be empty; consumers refuse an empty G.
+    """
+    shape = getattr(golden_mask, "shape", None)
+    if not isinstance(shape, tuple) or len(shape) != 2:
+        raise DetectionInputError(f"golden footprint: 2D mask required - {shape!r}")
+    footprint = _binary_mask(golden_mask, "golden footprint", shape)
+    roi = _binary_mask(roi_mask, "roi_mask", shape)
+    if (not isinstance(pose, Pose)
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       and math.isfinite(v) for v in (pose.tx, pose.ty, pose.theta_deg))):
+        raise DetectionInputError(f"pose: finite Pose required - {pose!r}")
+    height, width = shape
+    origin, x_axis, y_axis = transform_points(_AFFINE_BASIS, pose, (width, height))
+    affine = np.column_stack([x_axis - origin, y_axis - origin, origin])
+    mapped = cv2.warpAffine(
+        footprint, affine, (width, height), flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+    )
+    return cv2.bitwise_and(mapped, roi)
+
+
+# ── color_stats (docs/DESIGN.md 6.2) ─────────────────────────────────────
+
+def _chroma_value(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """phi(h,s,v) = (c cos 2 pi h, c sin 2 pi h, v) with c = s*v, stacked last.
+
+    Hue is circular through cos/sin, so 0 and 1 coincide; c = s*v makes hue
+    irrelevant at s=0 and hue and saturation irrelevant at v=0, where OpenCV
+    reports H=0 for every grey, white and black pixel.
+    """
+    chroma = s * v
+    angle = 2.0 * math.pi * h
+    return np.stack([chroma * np.cos(angle), chroma * np.sin(angle), v], axis=-1)
+
+
+def measure_color_stats(
+    image_bgr: np.ndarray,
+    footprint: np.ndarray,
+    expect_hsv_center: Sequence[float],
+) -> ColorStatsMeasurement:
+    """D = sqrt(mean ||phi(observed) - phi(expected)||^2) / 2 over G.
+
+    The observed pixels are the original frame colours inside the golden
+    footprint G - not the HSV foreground C.  A coating of the wrong material
+    and a missing coating both leave C empty; reading only C would make this
+    tool unable to see either.  Per-pixel distances are averaged (RMS), so
+    opposite colours cannot cancel out the way a mean colour would.  The
+    largest possible distance is 2 (opposite hues at s = v = 1), hence the
+    final halving puts D in 0..1.
+    """
+    image = _validated_image(image_bgr)
+    region = _binary_mask(footprint, "footprint", image.shape[:2])
+    pixels = int(np.count_nonzero(region))
+    if pixels == 0:
+        raise DetectionInputError(
+            "footprint G: empty - colour cannot be measured, and an unmeasured colour is not a PASS"
+        )
+    centre = _hsv_triple(expect_hsv_center, "expect_hsv_center")
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[region != 0].astype(np.float64)
+    observed = _chroma_value(
+        hsv[:, 0] / OPENCV_HUE_PERIOD,
+        hsv[:, 1] / HSV_CHANNEL_SCALES[1],
+        hsv[:, 2] / HSV_CHANNEL_SCALES[2],
+    )
+    expected = _chroma_value(centre[0], centre[1], centre[2])
+    mean_square = float(np.mean(np.sum((observed - expected) ** 2, axis=1)))
+    return ColorStatsMeasurement(distance=math.sqrt(mean_square) / 2.0, footprint_pixels=pixels)
+
+
+def evaluate_color_stats(
+    image_bgr: np.ndarray,
+    footprint: np.ndarray,
+    rule: Rule,
+) -> ColorStatsResult:
+    """Evaluate one loaded color_stats rule; the boundary D == max_dist passes."""
+    if not isinstance(rule, Rule) or rule.tool != "color_stats":
+        actual = getattr(rule, "tool", None)
+        raise DetectionInputError(f"rule: color_stats Rule required - {actual!r}")
+    params = dict(rule.params)
+    measurement = measure_color_stats(image_bgr, footprint, params["expect_hsv_center"])
+    failed = ("max_dist",) if measurement.distance > float(params["max_dist"]) else ()
+    return ColorStatsResult(measurement, not failed, failed)
