@@ -22,6 +22,53 @@ def _sample_dict() -> dict:
     return json.loads(SAMPLE.read_text(encoding="utf-8"))
 
 
+def _full_params_dict() -> dict:
+    """The sample with every tool and every optional parameter present (#12).
+
+    Probes that walk the sample cannot reach a tool the sample does not use or
+    an optional parameter it leaves out.  This recipe exists only to be walked;
+    the sample itself stays the fixed baseline for normal-sample invariance.
+    """
+    d = _sample_dict()
+    d["rois"][0]["rules"] = [
+        {"tool": "blob", "count_min": 1, "count_max": 2, "area_min": 0.005, "area_max": 0.9,
+         "circularity_min": 0.05, "circularity_max": 0.95, "solidity_min": 0.3,
+         "aspect_ratio_min": 1.0, "aspect_ratio_max": 40.0},
+        {"tool": "coverage", "min": 0.2, "max": 0.9, "continuity_min": 0.8},
+        {"tool": "color_stats", "expect_hsv_center": [0.0, 0.02, 0.66], "max_dist": 0.2},
+        {"tool": "shape_compare", "iou_min": 0.9, "excess_max": 0.1, "deficit_max": 0.1},
+    ]
+    return d
+
+
+# 주입 프로브가 순회하는 기준 레시피. 샘플만 돌면 샘플에 없는 tool·생략된 선택
+# 파라미터가 구조적으로 빠진다 - 17개 (tool, parameter) 중 8개만 주입됐다(#12).
+PROBE_BASES = [
+    pytest.param(_sample_dict, id="sample"),
+    pytest.param(_full_params_dict, id="full-params"),
+]
+
+
+def _rule_parameters(d: dict) -> set:
+    """(tool, parameter) pairs a recipe dict addresses - what a probe walking it can reach."""
+    return {(rule["tool"], key)
+            for roi in d["rois"] for rule in roi["rules"] for key in rule if key != "tool"}
+
+
+def test_full_params_recipe_reaches_every_tool_parameter():
+    # 부분집합이 아니라 등호다 - PARAM_SPECS 에 tool·파라미터가 늘면 여기가 먼저 깨진다.
+    every = {(tool, key) for tool, spec in PARAM_SPECS.items() for key in spec}
+    assert _rule_parameters(_full_params_dict()) == every
+    parse_recipe(_full_params_dict())                 # 순회 기준 자체가 유효해야 한다
+
+
+def test_sample_recipe_reaches_only_part_of_the_parameters():
+    # 샘플 단독 순회가 왜 모자랐는지의 기록. 샘플이 바뀌어 전부 덮게 되면 이 테스트를
+    # 지우고 PROBE_BASES 를 샘플 하나로 줄여도 된다.
+    every = {(tool, key) for tool, spec in PARAM_SPECS.items() for key in spec}
+    assert _rule_parameters(_sample_dict()) < every
+
+
 def test_sample_recipe_loads():
     r = load_recipe(SAMPLE)
     assert r.recipe_id == "SYNTH_BEAD_V1"
@@ -199,6 +246,43 @@ def test_bool_is_not_accepted_as_phase1_number(where, key):
         d["alignment"]["anchors"][0]["origin"][0] = True
     with pytest.raises(RecipeError):
         parse_recipe(d)
+
+
+def _hsv_triple(d: dict, where: str) -> list:
+    roi = d["rois"][0]
+    if where == "expect_hsv_center":
+        return next(r for r in roi["rules"] if r["tool"] == "color_stats")[where]
+    return roi["detect"][where]
+
+
+@pytest.mark.parametrize("where", ["expect_hsv_center", "lower", "upper"])
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("value", [True, False])
+def test_bool_is_not_accepted_in_any_hsv_triple(where, index, value):
+    # issue #11: bool is an int subclass and True/False sit inside 0..1, so the
+    # old check took them as 1.0/0.0. Every [h, s, v] field shares one check now.
+    d = _sample_dict()
+    _hsv_triple(d, where)[index] = value
+    with pytest.raises(RecipeError, match=r"\[h, s, v\]"):
+        parse_recipe(d)
+
+
+def test_bool_in_hsv_triple_is_rejected_through_the_file_path(tmp_path):
+    d = _sample_dict()
+    _hsv_triple(d, "expect_hsv_center")[1] = True
+    path = tmp_path / "bool_hsv.json"
+    path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(RecipeError, match="expect_hsv_center"):
+        load_recipe(path)
+
+
+def test_integer_endpoints_in_hsv_triples_still_load():
+    # The fix must reject bool, not int: 0 and 1 are legitimate JSON integers.
+    d = _sample_dict()
+    _hsv_triple(d, "expect_hsv_center")[:] = [0, 0, 1]
+    d["rois"][0]["detect"]["lower"] = [0, 0, 0]
+    d["rois"][0]["detect"]["upper"] = [1, 1, 1]
+    parse_recipe(d)
 
 
 def test_removed_alignment_fields_are_rejected_as_dead_parameters():
@@ -574,16 +658,17 @@ BIG_INT_VALUES = [10 ** 309, -(10 ** 309), 10 ** 400, -(10 ** 400),
                   10 ** 4299, -(10 ** 4299), 10 ** 4300, -(10 ** 4300)]
 
 
+@pytest.mark.parametrize("base", PROBE_BASES)
 @pytest.mark.parametrize("big", BIG_INTS)
-def test_no_big_integer_escapes_the_loader_as_a_foreign_exception(big):
+def test_no_big_integer_escapes_the_loader_as_a_foreign_exception(big, base):
     # 로더의 계약은 "항상 거부"가 아니라 "RecipeError 외의 예외를 내지 않는다"다.
     # meta.recipe_version 처럼 상한이 없는 필드는 큰 정수를 정상 수용할 수 있다.
-    paths = list(_numeric_paths(_sample_dict()))
+    paths = list(_numeric_paths(base()))
     assert len(paths) > 40, f"주입 지점이 너무 적다: {len(paths)}"
 
     escaped = []
     for path in paths:
-        d = _sample_dict()
+        d = base()
         _set_path(d, path, big)
         try:
             parse_recipe(d)
@@ -706,16 +791,17 @@ FOREIGN_VALUES = [
 ]
 
 
+@pytest.mark.parametrize("base", PROBE_BASES)
 @pytest.mark.parametrize("value", FOREIGN_VALUES)
-def test_no_schema_position_escapes_the_loader_as_a_foreign_exception(value):
+def test_no_schema_position_escapes_the_loader_as_a_foreign_exception(value, base):
     # 로더 총체성: 어떤 위치에 어떤 JSON 값이 들어와도 RecipeError 아니면 통과다.
     # 다른 예외로 나가면 호출자가 "검증 실패"와 "로더 버그"를 구분할 수 없다.
-    paths = list(_all_paths(_sample_dict()))
+    paths = list(_all_paths(base()))
     assert len(paths) > 80, f"주입 지점이 너무 적다: {len(paths)}"
 
     escaped = []
     for path in paths:
-        d = _sample_dict()
+        d = base()
         try:
             _set_path(d, path, value)
         except (TypeError, KeyError, IndexError):
