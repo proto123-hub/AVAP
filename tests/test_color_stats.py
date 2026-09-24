@@ -20,7 +20,9 @@ from avap.detection import (
     measure_color_stats,
 )
 from avap.recipe import PARAM_SPECS, Rule, load_recipe
-from avap.synth import BEAD_THICKNESS, BEAD_X0, BEAD_X1, BEAD_Y, apply_pose, draw_golden
+from avap.synth import (
+    BEAD_THICKNESS, BEAD_X0, BEAD_X1, BEAD_Y, BG, MATERIAL, apply_pose, draw_golden,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 SAMPLE = REPO / "recipes" / "sample_synth.json"
@@ -145,6 +147,31 @@ def test_map_footprint_refuses_masks_of_different_shapes():
     with pytest.raises(DetectionInputError):
         map_footprint(np.full((4, 4), 255, np.uint8), Pose(0.0, 0.0, 0.0),
                       np.full((4, 5), 255, np.uint8))
+
+
+@pytest.mark.parametrize("pose", [Pose(-9.0, 6.7, -2.9), Pose(9.0, -6.7, 2.9)])
+def test_morphology_order_moves_the_footprint_by_a_few_pixels_inside_the_pose_gate(pose):
+    # G0 는 골든 좌표에서 형태학을 거친 뒤 회전되고, C 는 회전된 제품에 형태학을 건다.
+    # 축 정렬 커널에서 둘은 교환되지 않는다(Codex #14 리뷰). 샘플 설정에서 그 차이가
+    # pose 게이트(3°) 끝에서도 몇 픽셀임을 고정한다 - 비교 대상은 형태학 전 마스크를
+    # 먼저 사상하고 프레임에서 같은 make_mask 로 형태학을 거는 순서다.
+    recipe, roi_config, _rule_ = _sample()
+    width, height = recipe.golden_size
+    golden = draw_golden("ok")
+    g0 = golden_footprint(golden, roi_config.rect_golden, roi_config.detect)
+    roi = make_roi_mask(roi_config.rect_golden, pose, recipe.golden_size)
+    spec_order = map_footprint(g0, pose, roi)
+
+    no_morph = tuple((k, v) for k, v in roi_config.detect if k != "morph")
+    everywhere = np.full((height, width), 255, dtype=np.uint8)
+    raw = map_footprint(make_mask(golden, everywhere, no_morph).foreground, pose, everywhere)
+    painted = np.zeros_like(golden)
+    painted[:] = BG
+    painted[raw != 0] = MATERIAL
+    frame_order = make_mask(painted, roi, roi_config.detect).foreground
+
+    differ = int(np.count_nonzero((spec_order != 0) ^ (frame_order != 0)))
+    assert differ <= 0.001 * np.count_nonzero(spec_order), differ
 
 
 # ── measurement properties (6.2) ─────────────────────────────────────────

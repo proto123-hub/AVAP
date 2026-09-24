@@ -531,7 +531,8 @@ def golden_footprint(
 
     It is the ordinary make_mask output for the golden snapshot the aligner
     was built from, at the identity pose - no second detector.  It does not
-    depend on the inspected frame, so build it once per (recipe, golden).
+    depend on the inspected frame, so build it once per (recipe, golden, ROI):
+    it does depend on the ROI's rect_golden and detect block.
     An empty G0 means the golden shows no material in this ROI: the recipe
     and golden do not describe a coating, which is a configuration error.
     """
