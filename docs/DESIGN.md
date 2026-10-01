@@ -243,6 +243,16 @@ rect 9 26px, cross 11 47px(0.55%)다. 같은 조건의 가장자리 재표본화
 같은 footprint다. 비대칭 형상의 방향 반전과 대칭 형상의 등가성을 **각각** 검증하고,
 방향 시험은 **앵커를 고정한 채 도포만 회전**시킨다.
 
+**위 정의가 정하지 않은 것은 구현에서 확정했다.** `tests/test_shape_compare.py`가 고정한다.
+
+| 케이스 | 확정 | 근거 |
+|---|---|---|
+| `G`에 ROI 밖 픽셀이 있음 | `measure_shape_compare`가 `DetectionInputError` | 자르지 않은 `G0`를 넘기면 프레임이 검사하지 않는 골든 픽셀이 deficit으로 잡힌다. `map_footprint`가 ROI와 교집합한 `G`만 받는다 |
+| 사상 후 `G`가 빔 | `DetectionInputError` | 위 정의 그대로 — 측정 불능(판정 UNKNOWN)이지 `IoU=1`이 아니다. color_stats와 같은 메시지 형식 |
+| 판정 경계 | `IoU == iou_min`, `excess == excess_max`, `deficit == deficit_max`는 PASS. 실패한 파라미터는 `PARAM_SPECS` 선언 순서로 보고 | coverage·blob·color_stats와 같은 포함 경계. 순서를 고정해야 Evidence가 실행마다 같다 |
+| 선택 파라미터 | `excess_max`·`deficit_max`가 없으면 그 검사를 하지 않는다 | coverage `max`와 같은 규약 |
+| 방향 시험 | 쐐기(비대칭) 도포만 180° → IoU 1.0 → 0.614(넘친 만큼 모자람: excess = deficit). 대칭 비드 180° → 측정 동일. 두 경우 모두 복원 pose가 항등임을 먼저 확인 | 정렬이 회전을 흡수했다면 이 시험은 방향을 보지 못한다 |
+
 보류 목록(착수 전 "무엇에 기여하는가" 문답 필수): 특정 패턴 전용 검사, 딥러닝 검출 tool, ECC/특징점 폴백, 자동 임계 추천 이식, EXE 패키징.
 
 ## 7. 판정 엔진 — Evidence가 1급
