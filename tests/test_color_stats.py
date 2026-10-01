@@ -406,6 +406,15 @@ def test_integer_and_array_centres_are_accepted(centre):
     measure_color_stats(image, _everywhere(image), centre)
 
 
+@pytest.mark.parametrize("hue", [0.0, 1.0])
+def test_equivalent_red_hue_endpoints_pass_zero_threshold(hue):
+    image = _solid(RED)
+    result = evaluate_color_stats(
+        image, _everywhere(image), _rule(expect_hsv_center=(hue, 1.0, 1.0), max_dist=0.0))
+    assert result.measurement.distance == 0.0
+    assert result.passed
+
+
 @pytest.mark.parametrize(
     "image, footprint, message",
     [

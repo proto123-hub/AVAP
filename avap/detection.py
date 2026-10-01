@@ -605,7 +605,7 @@ def _chroma_value(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
     reports H=0 for every grey, white and black pixel.
     """
     chroma = s * v
-    angle = 2.0 * math.pi * h
+    angle = 2.0 * math.pi * (h % 1.0)
     return np.stack([chroma * np.cos(angle), chroma * np.sin(angle), v], axis=-1)
 
 
