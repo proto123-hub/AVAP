@@ -377,6 +377,8 @@ BAD_CENTRES = [
     pytest.param([0.0, False, 0.5], id="S-false"),
     pytest.param([0.0, 0.0, True], id="V-true"),
     pytest.param(np.array([True, False, True]), id="bool-array"),
+    pytest.param(np.array(0.5), id="scalar-array"),
+    pytest.param(np.array(True), id="scalar-bool-array"),
     pytest.param([math.nan, 0.0, 0.5], id="nan"),
     pytest.param([0.0, math.inf, 0.5], id="inf"),
     pytest.param([-0.1, 0.0, 0.5], id="negative"),
@@ -434,6 +436,16 @@ def test_make_mask_refuses_a_bool_inside_hsv_bounds(bound, index):
     detect = {"space": "hsv", "lower": [0.0, 0.0, 0.0], "upper": [1.0, 1.0, 1.0]}
     detect[bound] = list(detect[bound])
     detect[bound][index] = bool(detect[bound][index])
+    image = np.zeros((4, 4, 3), np.uint8)
+    with pytest.raises(DetectionInputError, match="three numeric"):
+        make_mask(image, np.full((4, 4), 255, np.uint8), detect)
+
+
+@pytest.mark.parametrize("bound", ["lower", "upper"])
+@pytest.mark.parametrize("value", [np.array(0.5), np.array(True)])
+def test_make_mask_refuses_scalar_hsv_arrays(bound, value):
+    detect = {"space": "hsv", "lower": [0.0, 0.0, 0.0], "upper": [1.0, 1.0, 1.0]}
+    detect[bound] = value
     image = np.zeros((4, 4, 3), np.uint8)
     with pytest.raises(DetectionInputError, match="three numeric"):
         make_mask(image, np.full((4, 4), 255, np.uint8), detect)

@@ -142,7 +142,9 @@ def _hsv_triple(value: Any, name: str) -> np.ndarray:
     floats, and float() overflows on huge ints, whereas a chained comparison
     rejects NaN, inf and huge ints alike.
     """
-    if not isinstance(value, (list, tuple, np.ndarray)) or len(value) != 3:
+    if (not isinstance(value, (list, tuple, np.ndarray))
+            or (isinstance(value, np.ndarray) and value.ndim != 1)
+            or len(value) != 3):
         raise DetectionInputError(f"{name}: three numeric 0..1 values required")
     items = list(value)
     if any(isinstance(item, (bool, np.bool_))
