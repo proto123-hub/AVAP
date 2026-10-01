@@ -201,6 +201,43 @@ def test_bool_is_not_accepted_as_phase1_number(where, key):
         parse_recipe(d)
 
 
+def _hsv_triple(d: dict, where: str) -> list:
+    roi = d["rois"][0]
+    if where == "expect_hsv_center":
+        return next(r for r in roi["rules"] if r["tool"] == "color_stats")[where]
+    return roi["detect"][where]
+
+
+@pytest.mark.parametrize("where", ["expect_hsv_center", "lower", "upper"])
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("value", [True, False])
+def test_bool_is_not_accepted_in_any_hsv_triple(where, index, value):
+    # issue #11: bool is an int subclass and True/False sit inside 0..1, so the
+    # old check took them as 1.0/0.0. Every [h, s, v] field shares one check now.
+    d = _sample_dict()
+    _hsv_triple(d, where)[index] = value
+    with pytest.raises(RecipeError, match=r"\[h, s, v\]"):
+        parse_recipe(d)
+
+
+def test_bool_in_hsv_triple_is_rejected_through_the_file_path(tmp_path):
+    d = _sample_dict()
+    _hsv_triple(d, "expect_hsv_center")[1] = True
+    path = tmp_path / "bool_hsv.json"
+    path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(RecipeError, match="expect_hsv_center"):
+        load_recipe(path)
+
+
+def test_integer_endpoints_in_hsv_triples_still_load():
+    # The fix must reject bool, not int: 0 and 1 are legitimate JSON integers.
+    d = _sample_dict()
+    _hsv_triple(d, "expect_hsv_center")[:] = [0, 0, 1]
+    d["rois"][0]["detect"]["lower"] = [0, 0, 0]
+    d["rois"][0]["detect"]["upper"] = [1, 1, 1]
+    parse_recipe(d)
+
+
 def test_removed_alignment_fields_are_rejected_as_dead_parameters():
     for where, key, value in [
         ("anchor", "patch", "anchors/a.png"),
